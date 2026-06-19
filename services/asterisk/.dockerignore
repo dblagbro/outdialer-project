@@ -1,0 +1,8 @@
+__pycache__/
+*.py[cod]
+.env
+.env.*
+*.log
+recording/
+outgoing/
+outgoing_done/

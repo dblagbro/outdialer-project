@@ -1,0 +1,92 @@
+services:
+  postgres:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_DB: ${POSTGRES_DB:-outdialer}
+      POSTGRES_USER: ${POSTGRES_USER:-outdialer}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-change-me}
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-outdialer} -d ${POSTGRES_DB:-outdialer}"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    restart: unless-stopped
+
+  redis:
+    image: redis:7-alpine
+    restart: unless-stopped
+
+  outdialer-api:
+    image: ${OUTDIALER_APP_IMAGE:-dblagbro/outdialer-project-app:latest}
+    build:
+      context: ./services/outdialer
+    env_file: .env
+    environment:
+      APP_ROLE: api
+      DATABASE_URL: postgresql+psycopg://${POSTGRES_USER:-outdialer}:${POSTGRES_PASSWORD:-change-me}@postgres:5432/${POSTGRES_DB:-outdialer}
+      ASTERISK_LOG_DIR: /asterisk-logs
+    ports:
+      - "${OUTDIALER_HTTP_PORT:-8088}:8080"
+    depends_on:
+      postgres:
+        condition: service_healthy
+    volumes:
+      - asterisk_recordings:/recordings:ro
+      - asterisk_logs:/asterisk-logs:ro
+    networks:
+      - default
+      - shared_ai
+    restart: unless-stopped
+
+  outdialer-worker:
+    image: ${OUTDIALER_APP_IMAGE:-dblagbro/outdialer-project-app:latest}
+    build:
+      context: ./services/outdialer
+    env_file: .env
+    environment:
+      APP_ROLE: worker
+      DATABASE_URL: postgresql+psycopg://${POSTGRES_USER:-outdialer}:${POSTGRES_PASSWORD:-change-me}@postgres:5432/${POSTGRES_DB:-outdialer}
+      ASTERISK_OUTGOING_DIR: /asterisk-spool/outgoing
+      ASTERISK_LOG_DIR: /asterisk-logs
+    volumes:
+      - asterisk_spool:/asterisk-spool
+      - asterisk_logs:/asterisk-logs:ro
+    depends_on:
+      postgres:
+        condition: service_healthy
+    restart: unless-stopped
+
+  asterisk:
+    image: ${OUTDIALER_ASTERISK_IMAGE:-dblagbro/outdialer-project-asterisk:latest}
+    build:
+      context: ./services/asterisk
+    env_file: .env
+    ports:
+      - "${SIP_PORT:-5060}:5060/udp"
+      - "${SIP_PORT:-5060}:5060/tcp"
+      - "${RTP_PORT_START:-10000}-${RTP_PORT_END:-10100}:${RTP_PORT_START:-10000}-${RTP_PORT_END:-10100}/udp"
+    volumes:
+      - asterisk_spool:/var/spool/asterisk
+      - asterisk_sounds:/var/lib/asterisk/sounds/generated
+      - asterisk_recordings:/var/spool/asterisk/recording
+      - asterisk_logs:/var/log/asterisk
+    depends_on:
+      - outdialer-api
+    networks:
+      - default
+      - shared_ai
+    restart: unless-stopped
+
+volumes:
+  postgres_data:
+  asterisk_spool:
+  asterisk_sounds:
+  asterisk_recordings:
+  asterisk_logs:
+
+networks:
+  shared_ai:
+    external: true
+    name: docker_default

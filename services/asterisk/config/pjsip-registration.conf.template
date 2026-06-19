@@ -1,0 +1,11 @@
+
+[avaya-registration]
+type=registration
+transport=transport-${AVAYA_SIP_TRANSPORT}
+outbound_auth=avaya-auth
+server_uri=sip:${AVAYA_SIP_HOST}:${AVAYA_SIP_PORT}
+client_uri=sip:${AVAYA_SIP_USERNAME}@${AVAYA_FROM_DOMAIN}
+contact_user=${AVAYA_SIP_USERNAME}
+retry_interval=60
+forbidden_retry_interval=300
+expiration=3600
