@@ -52,7 +52,9 @@ def init_db() -> None:
                     intro_script TEXT,
                     voicemail_script TEXT,
                     voice_prompt_script TEXT,
+                    attending_followup_script TEXT,
                     thanks_attending_script TEXT,
+                    headcount_missing_script TEXT,
                     thanks_not_attending_script TEXT,
                     thanks_unsure_script TEXT,
                     thanks_callback_script TEXT,
@@ -65,7 +67,9 @@ def init_db() -> None:
                 "intro_script",
                 "voicemail_script",
                 "voice_prompt_script",
+                "attending_followup_script",
                 "thanks_attending_script",
+                "headcount_missing_script",
                 "thanks_not_attending_script",
                 "thanks_unsure_script",
                 "thanks_callback_script",
@@ -93,10 +97,12 @@ def init_db() -> None:
             connection.execute(text("UPDATE campaigns SET ai_max_turns=3 WHERE ai_max_turns IS NULL OR ai_max_turns < 1"))
             connection.execute(text("""
                 UPDATE campaigns SET
-                    intro_script = coalesce(intro_script, 'Hi {contact_name}. This is Devin''s Out Caller. Press 1 if you are attending. Press 2 if you cannot attend. Press 3 if you are not sure. Press 9 if you would like a person to call you back. Or, after the tone, say yes, no, not sure, or call me back.'),
+                    intro_script = coalesce(intro_script, 'Hi {contact_name}. This is Devin''s Out Caller. Press 1 if you are attending, then stay on the line for one quick headcount question. Press 2 if you cannot attend. Press 3 if you are not sure. Press 9 if you would like a person to call you back. Or, after the tone, say yes, no, not sure, or call me back.'),
                     voicemail_script = coalesce(voicemail_script, 'Hello. This is Devin''s Out Caller. Please call us back. Goodbye.'),
                     voice_prompt_script = coalesce(voice_prompt_script, 'Please say yes, no, not sure, or call me back after the tone.'),
-                    thanks_attending_script = coalesce(thanks_attending_script, 'Thank you. We have you marked as attending. Goodbye.'),
+                    attending_followup_script = coalesce(attending_followup_script, 'Great. For the caterer, please enter the total number of people coming, including yourself, using one or two digits. Or, after the tone, say the total and whether you are bringing kids, friends, or other family.'),
+                    thanks_attending_script = coalesce(thanks_attending_script, 'Thank you. We have you marked as attending with a total headcount of {party_size}. Goodbye.'),
+                    headcount_missing_script = coalesce(headcount_missing_script, 'Thank you. We have you marked as attending, but we did not catch the headcount. Someone may follow up. Goodbye.'),
                     thanks_not_attending_script = coalesce(thanks_not_attending_script, 'Thank you. We have you marked as not attending. Goodbye.'),
                     thanks_unsure_script = coalesce(thanks_unsure_script, 'Thank you. We have you marked as unsure. Goodbye.'),
                     thanks_callback_script = coalesce(thanks_callback_script, 'Thank you. Someone will call you back. Goodbye.'),
@@ -109,7 +115,7 @@ def init_db() -> None:
                     max_calls_per_worker_tick, ai_enabled, ai_provider, ai_observe_ms, ai_listen_ms, ai_max_turns,
                     ai_event_context, ai_system_prompt, ai_builder_notes, flowise_api_url, flowise_chatflow_id,
                     flowise_api_key, flowise_username, flowise_password, intro_script, voicemail_script, voice_prompt_script,
-                    thanks_attending_script, thanks_not_attending_script, thanks_unsure_script,
+                    attending_followup_script, thanks_attending_script, headcount_missing_script, thanks_not_attending_script, thanks_unsure_script,
                     thanks_callback_script, no_response_script, created_at, updated_at
                 )
                 SELECT
@@ -130,18 +136,20 @@ def init_db() -> None:
                     0,
                     7000,
                     3,
-                    'Birthday RSVP call. Ask whether the contact is attending. Confirm yes, no, unsure, or callback requested. Keep responses warm, short, and family-friendly.',
-                    'You are the call brain for Devin''s Out Caller. Return concise JSON actions only. Start speaking immediately when observe_ms is 0, distinguish voicemail from human speech when audio is available, and never mark RSVP unless the contact clearly answers.',
+                    'Birthday RSVP call. Ask whether the contact is attending. If attending, collect catering headcount: total number coming including the contact, and whether that includes kids, friends, or other family. Keep responses warm, short, and family-friendly.',
+                    'You are the call brain for Devin''s Out Caller. Return concise JSON actions only. Start speaking immediately when observe_ms is 0, distinguish voicemail from human speech when audio is available, and never mark attending complete until a headcount is collected or flagged for follow-up.',
                     '',
                     coalesce((SELECT value FROM settings WHERE key='flowise_api_url'), 'http://gaid:3000/api/v1/prediction'),
                     coalesce((SELECT value FROM settings WHERE key='flowise_chatflow_id'), ''),
                     coalesce((SELECT value FROM settings WHERE key='flowise_api_key'), ''),
                     coalesce((SELECT value FROM settings WHERE key='flowise_username'), ''),
                     coalesce((SELECT value FROM settings WHERE key='flowise_password'), ''),
-                    'Hi {contact_name}. This is Devin''s Out Caller. Press 1 if you are attending. Press 2 if you cannot attend. Press 3 if you are not sure. Press 9 if you would like a person to call you back. Or, after the tone, say yes, no, not sure, or call me back.',
+                    'Hi {contact_name}. This is Devin''s Out Caller. Press 1 if you are attending, then stay on the line for one quick headcount question. Press 2 if you cannot attend. Press 3 if you are not sure. Press 9 if you would like a person to call you back. Or, after the tone, say yes, no, not sure, or call me back.',
                     'Hello. This is Devin''s Out Caller. Please call us back. Goodbye.',
                     'Please say yes, no, not sure, or call me back after the tone.',
-                    'Thank you. We have you marked as attending. Goodbye.',
+                    'Great. For the caterer, please enter the total number of people coming, including yourself, using one or two digits. Or, after the tone, say the total and whether you are bringing kids, friends, or other family.',
+                    'Thank you. We have you marked as attending with a total headcount of {party_size}. Goodbye.',
+                    'Thank you. We have you marked as attending, but we did not catch the headcount. Someone may follow up. Goodbye.',
                     'Thank you. We have you marked as not attending. Goodbye.',
                     'Thank you. We have you marked as unsure. Goodbye.',
                     'Thank you. Someone will call you back. Goodbye.',
@@ -151,16 +159,23 @@ def init_db() -> None:
             """))
             connection.execute(text("""
                 UPDATE campaigns SET
-                    intro_script = coalesce(intro_script, 'Hi {contact_name}. This is Devin''s Out Caller. Press 1 if you are attending. Press 2 if you cannot attend. Press 3 if you are not sure. Press 9 if you would like a person to call you back. Or, after the tone, say yes, no, not sure, or call me back.'),
+                    intro_script = coalesce(intro_script, 'Hi {contact_name}. This is Devin''s Out Caller. Press 1 if you are attending, then stay on the line for one quick headcount question. Press 2 if you cannot attend. Press 3 if you are not sure. Press 9 if you would like a person to call you back. Or, after the tone, say yes, no, not sure, or call me back.'),
                     voicemail_script = coalesce(voicemail_script, 'Hello. This is Devin''s Out Caller. Please call us back. Goodbye.'),
                     voice_prompt_script = coalesce(voice_prompt_script, 'Please say yes, no, not sure, or call me back after the tone.'),
-                    thanks_attending_script = coalesce(thanks_attending_script, 'Thank you. We have you marked as attending. Goodbye.'),
+                    attending_followup_script = coalesce(attending_followup_script, 'Great. For the caterer, please enter the total number of people coming, including yourself, using one or two digits. Or, after the tone, say the total and whether you are bringing kids, friends, or other family.'),
+                    thanks_attending_script = coalesce(thanks_attending_script, 'Thank you. We have you marked as attending with a total headcount of {party_size}. Goodbye.'),
+                    headcount_missing_script = coalesce(headcount_missing_script, 'Thank you. We have you marked as attending, but we did not catch the headcount. Someone may follow up. Goodbye.'),
                     thanks_not_attending_script = coalesce(thanks_not_attending_script, 'Thank you. We have you marked as not attending. Goodbye.'),
                     thanks_unsure_script = coalesce(thanks_unsure_script, 'Thank you. We have you marked as unsure. Goodbye.'),
                     thanks_callback_script = coalesce(thanks_callback_script, 'Thank you. Someone will call you back. Goodbye.'),
                     no_response_script = coalesce(no_response_script, 'Sorry, we did not get a response. We may try again another time. Goodbye.')
             """))
             connection.execute(text("ALTER TABLE contacts ADD COLUMN IF NOT EXISTS campaign_id VARCHAR(36)"))
+            connection.execute(text("ALTER TABLE contacts ADD COLUMN IF NOT EXISTS party_size INTEGER"))
+            connection.execute(text("ALTER TABLE contacts ADD COLUMN IF NOT EXISTS party_kids INTEGER"))
+            connection.execute(text("ALTER TABLE contacts ADD COLUMN IF NOT EXISTS party_friends INTEGER"))
+            connection.execute(text("ALTER TABLE contacts ADD COLUMN IF NOT EXISTS party_family INTEGER"))
+            connection.execute(text("ALTER TABLE contacts ADD COLUMN IF NOT EXISTS party_details TEXT"))
             connection.execute(text("ALTER TABLE call_attempts ADD COLUMN IF NOT EXISTS campaign_id VARCHAR(36)"))
             connection.execute(text("""
                 CREATE TABLE IF NOT EXISTS event_logs (
@@ -206,6 +221,11 @@ def init_db() -> None:
             connection.execute(text("ALTER TABLE call_attempts ADD COLUMN IF NOT EXISTS sip_last_response_at TIMESTAMP WITH TIME ZONE"))
             connection.execute(text("ALTER TABLE call_attempts ADD COLUMN IF NOT EXISTS ai_decision TEXT"))
             connection.execute(text("ALTER TABLE call_attempts ADD COLUMN IF NOT EXISTS ai_trace TEXT"))
+            connection.execute(text("ALTER TABLE call_attempts ADD COLUMN IF NOT EXISTS party_size INTEGER"))
+            connection.execute(text("ALTER TABLE call_attempts ADD COLUMN IF NOT EXISTS party_kids INTEGER"))
+            connection.execute(text("ALTER TABLE call_attempts ADD COLUMN IF NOT EXISTS party_friends INTEGER"))
+            connection.execute(text("ALTER TABLE call_attempts ADD COLUMN IF NOT EXISTS party_family INTEGER"))
+            connection.execute(text("ALTER TABLE call_attempts ADD COLUMN IF NOT EXISTS party_details TEXT"))
             connection.execute(text("""
                 CREATE TABLE IF NOT EXISTS event_logs (
                     id VARCHAR(36) PRIMARY KEY,

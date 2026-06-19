@@ -23,13 +23,18 @@ from .models import CallAttempt, Campaign, Contact, EventLog, now_utc
 
 app = FastAPI(title="Devin's Out Caller")
 
-CSV_TEMPLATE = "name,phone,notes\nJane Example,+18455551212,Needs callback after 5 PM\nJohn Example,5555,Internal test extension\n"
+CSV_TEMPLATE = (
+    "name,phone,party_size,party_kids,party_friends,party_family,party_details,notes\n"
+    "Jane Example,+18455551212,,,,,,Needs callback after 5 PM\n"
+    "John Example,5555,2,0,1,0,Bringing one friend,Internal test extension\n"
+)
 DEFAULT_CAMPAIGN_ID = "default"
 RECORDINGS_DIR = "/recordings"
 ASTERISK_LOG_DIR = os.getenv("ASTERISK_LOG_DIR", "/asterisk-logs")
 STATUSES = [
     "pending",
     "attending",
+    "attending_needs_headcount",
     "not_attending",
     "unsure",
     "callback_requested",
@@ -53,10 +58,12 @@ DIAL_NORMALIZATION_OPTIONS = {
     "as_entered": "Keep +, *, and # as entered",
 }
 SCRIPT_FIELDS = {
-    "intro_script": "Hi {contact_name}. This is Devin's Out Caller. Press 1 if you are attending. Press 2 if you cannot attend. Press 3 if you are not sure. Press 9 if you would like a person to call you back. Or, after the tone, say yes, no, not sure, or call me back.",
+    "intro_script": "Hi {contact_name}. This is Devin's Out Caller. Press 1 if you are attending, then stay on the line for one quick headcount question. Press 2 if you cannot attend. Press 3 if you are not sure. Press 9 if you would like a person to call you back. Or, after the tone, say yes, no, not sure, or call me back.",
     "voicemail_script": "Hello. This is Devin's Out Caller. Please call us back. Goodbye.",
     "voice_prompt_script": "Please say yes, no, not sure, or call me back after the tone.",
-    "thanks_attending_script": "Thank you. We have you marked as attending. Goodbye.",
+    "attending_followup_script": "Great. For the caterer, please enter the total number of people coming, including yourself, using one or two digits. Or, after the tone, say the total and whether you are bringing kids, friends, or other family.",
+    "thanks_attending_script": "Thank you. We have you marked as attending with a total headcount of {party_size}. Goodbye.",
+    "headcount_missing_script": "Thank you. We have you marked as attending, but we did not catch the headcount. Someone may follow up. Goodbye.",
     "thanks_not_attending_script": "Thank you. We have you marked as not attending. Goodbye.",
     "thanks_unsure_script": "Thank you. We have you marked as unsure. Goodbye.",
     "thanks_callback_script": "Thank you. Someone will call you back. Goodbye.",
@@ -67,13 +74,15 @@ AI_PROVIDERS = {
     "flowise": "Flowise chatflow",
 }
 DEFAULT_AI_EVENT_CONTEXT = (
-    "Birthday RSVP call. Ask whether the contact is attending. Confirm yes, no, unsure, "
-    "or callback requested. Keep responses warm, short, and family-friendly."
+    "Birthday RSVP call. Ask whether the contact is attending. If attending, collect catering headcount: "
+    "total number coming including the contact, and whether that includes kids, friends, or other family. "
+    "Keep responses warm, short, and family-friendly."
 )
 DEFAULT_AI_SYSTEM_PROMPT = (
     "You are the call brain for Devin's Out Caller. Return concise JSON actions only. "
     "Start speaking immediately when observe_ms is 0, distinguish voicemail from human speech when audio is available, "
-    "and never mark RSVP unless the contact clearly answers."
+    "never mark RSVP unless the contact clearly answers, and never mark attending complete until a headcount is collected "
+    "or explicitly flagged for follow-up."
 )
 AI_DECISION_KEYS = {
     "action",
@@ -86,6 +95,13 @@ AI_DECISION_KEYS = {
     "listen_ms",
     "hangup_after",
     "source",
+    "next_stage",
+    "collect_digits",
+    "party_size",
+    "party_kids",
+    "party_friends",
+    "party_family",
+    "party_details",
 }
 SIP_LINE_RE = re.compile(
     r"(<--- (Transmitting|Received)|SIP/2\.0 \d{3}|^(Via|From|To|Call-ID|CSeq|Contact|Route|Record-Route|P-Asserted-Identity|Remote-Party-ID):|"
@@ -172,6 +188,21 @@ def clamp_int(value: str | int | None, default: int, minimum: int, maximum: int)
     return max(minimum, min(maximum, parsed))
 
 
+def optional_int(value: object, minimum: int = 0, maximum: int = 99) -> int | None:
+    if value is None:
+        return None
+    text = str(value).strip()
+    if not text:
+        return None
+    try:
+        parsed = int(text)
+    except (TypeError, ValueError):
+        return None
+    if parsed < minimum or parsed > maximum:
+        return None
+    return parsed
+
+
 def flowise_prediction_url(campaign: Campaign) -> str:
     base_url = (campaign.flowise_api_url or os.getenv("FLOWISE_API_URL") or "http://gaid:3000/api/v1/prediction").strip().rstrip("/")
     chatflow_id = (campaign.flowise_chatflow_id or os.getenv("FLOWISE_CHATFLOW_ID") or "").strip()
@@ -206,12 +237,19 @@ def extract_json_object(text: str) -> dict[str, object] | None:
     return None
 
 
-def render_for_contact(campaign: Campaign, contact: Contact | None, template: str) -> str:
+def render_for_contact(campaign: Campaign, contact: Contact | None, template: str, extra_values: dict[str, object] | None = None) -> str:
     values = {
         "campaign_id": campaign.id,
         "contact_name": contact.name if contact else "there",
         "callback_number": os.getenv("CALLBACK_NUMBER", ""),
+        "party_size": contact.party_size if contact and contact.party_size is not None else "",
+        "party_kids": contact.party_kids if contact and contact.party_kids is not None else "",
+        "party_friends": contact.party_friends if contact and contact.party_friends is not None else "",
+        "party_family": contact.party_family if contact and contact.party_family is not None else "",
+        "party_details": contact.party_details if contact and contact.party_details else "",
     }
+    if extra_values:
+        values.update({key: "" if value is None else value for key, value in extra_values.items()})
     class SafeVars(dict):
         def __missing__(self, key: str) -> str:
             return "{" + key + "}"
@@ -258,6 +296,182 @@ def looks_like_voicemail(transcript: str) -> bool:
     return any(re.search(pattern, text) for pattern in patterns)
 
 
+NUMBER_WORDS = {
+    "zero": 0,
+    "one": 1,
+    "a": 1,
+    "an": 1,
+    "two": 2,
+    "three": 3,
+    "four": 4,
+    "five": 5,
+    "six": 6,
+    "seven": 7,
+    "eight": 8,
+    "nine": 9,
+    "ten": 10,
+    "eleven": 11,
+    "twelve": 12,
+    "thirteen": 13,
+    "fourteen": 14,
+    "fifteen": 15,
+    "sixteen": 16,
+    "seventeen": 17,
+    "eighteen": 18,
+    "nineteen": 19,
+    "twenty": 20,
+}
+NUMBER_PATTERN = r"\d{1,2}|zero|one|two|three|four|five|six|seven|eight|nine|ten|eleven|twelve|thirteen|fourteen|fifteen|sixteen|seventeen|eighteen|nineteen|twenty|a|an"
+
+
+def number_value(value: str | None, minimum: int = 0, maximum: int = 99) -> int | None:
+    if not value:
+        return None
+    text = value.strip().lower().replace("-", " ")
+    if text.isdigit():
+        parsed = int(text)
+    else:
+        parsed = NUMBER_WORDS.get(text)
+    if parsed is None or parsed < minimum or parsed > maximum:
+        return None
+    return parsed
+
+
+def first_count(patterns: list[str], text: str, minimum: int = 1, maximum: int = 99) -> int | None:
+    for pattern in patterns:
+        match = re.search(pattern, text, re.I)
+        if match:
+            parsed = number_value(match.group("num"), minimum, maximum)
+            if parsed is not None:
+                return parsed
+    return None
+
+
+def sum_category(pattern: str, text: str) -> int | None:
+    total = 0
+    found = False
+    for match in re.finditer(rf"\b(?P<num>{NUMBER_PATTERN})\s+(?:{pattern})\b", text, re.I):
+        parsed = number_value(match.group("num"), 0, 99)
+        if parsed is not None:
+            total += parsed
+            found = True
+    return total if found else None
+
+
+def parse_party_info(transcript: str, digit: str = "") -> dict[str, object]:
+    text = (transcript or "").lower()
+    info: dict[str, object] = {}
+    digit_count = optional_int(re.sub(r"\D", "", str(digit or "")), 1, 99)
+    if digit_count is not None:
+        info["party_size"] = digit_count
+
+    if text:
+        info["party_details"] = transcript.strip()[:500]
+        kids = sum_category(r"kids?|children|child|grandkids?|grandchildren", text)
+        friends = sum_category(r"friends?", text)
+        family = sum_category(r"family members?|relatives?|cousins?|siblings?", text)
+        adults = sum_category(r"adults?|grownups?", text)
+        family_companions = len(
+            re.findall(
+                r"\bmy\s+(wife|husband|spouse|partner|mother|father|mom|dad|sister|brother|daughter|son|cousin|aunt|uncle)\b",
+                text,
+            )
+        )
+        if kids is not None:
+            info["party_kids"] = kids
+        if friends is not None:
+            info["party_friends"] = friends
+        if family is not None or family_companions:
+            info["party_family"] = (family or 0) + family_companions
+
+        explicit_total = first_count(
+            [
+                rf"\bparty\s+of\s+(?P<num>{NUMBER_PATTERN})\b",
+                rf"\btotal\s+(?:of\s+)?(?P<num>{NUMBER_PATTERN})\b",
+                rf"\bheadcount\s+(?:is\s+)?(?P<num>{NUMBER_PATTERN})\b",
+                rf"\bthere\s+(?:will\s+be|are)\s+(?P<num>{NUMBER_PATTERN})\b",
+                rf"\bit\s+will\s+be\s+(?P<num>{NUMBER_PATTERN})\b",
+                rf"\bwe\s+(?:are|will\s+be|'ll\s+be)\s+(?P<num>{NUMBER_PATTERN})\b",
+                rf"\b(?P<num>{NUMBER_PATTERN})\s+(?:of\s+us|people|total|coming|attending)\b",
+            ],
+            text,
+            1,
+            99,
+        )
+        if explicit_total is not None:
+            info["party_size"] = explicit_total
+        elif re.search(r"\b(just|only)\s+me\b|\bmyself\b|\bjust\s+myself\b", text):
+            info["party_size"] = 1
+        elif "party_size" not in info:
+            category_total = sum(value for value in [kids, friends, family or 0, family_companions] if value)
+            if adults is not None:
+                category_total += adults
+            has_self_reference = re.search(r"\b(me\s+and|myself\s+and|i\s+am\s+bringing|i'm\s+bringing|i\s+will\s+bring|i'll\s+bring)\b", text)
+            if has_self_reference and category_total:
+                info["party_size"] = min(99, 1 + category_total)
+            elif adults is not None and category_total:
+                info["party_size"] = min(99, category_total)
+    return info
+
+
+def party_values_for_decision(party_info: dict[str, object]) -> dict[str, object]:
+    return {
+        "party_size": party_info.get("party_size"),
+        "party_kids": party_info.get("party_kids"),
+        "party_friends": party_info.get("party_friends"),
+        "party_family": party_info.get("party_family"),
+        "party_details": party_info.get("party_details"),
+    }
+
+
+def attending_followup_decision(campaign: Campaign, contact: Contact | None, reason: str = "", source: str = "local") -> dict[str, object]:
+    return normalize_ai_decision(
+        {
+            "action": "speak_and_listen",
+            "text": render_for_contact(campaign, contact, script_value(campaign, "attending_followup_script")),
+            "status": "collecting_headcount",
+            "listen_ms": max(campaign.ai_listen_ms or 7000, 6000),
+            "next_stage": "attending_followup",
+            "collect_digits": 2,
+            "hangup_after": False,
+            "reason": reason or "attending response needs catering headcount",
+            "source": source,
+        }
+    )
+
+
+def attending_done_decision(campaign: Campaign, contact: Contact | None, party_info: dict[str, object], reason: str = "", source: str = "local") -> dict[str, object]:
+    values = party_values_for_decision(party_info)
+    return normalize_ai_decision(
+        {
+            "action": "mark_rsvp",
+            "digit": "1",
+            "rsvp": "attending",
+            "status": "attending",
+            "text": render_for_contact(campaign, contact, script_value(campaign, "thanks_attending_script"), values),
+            "reason": reason or "attending response included catering headcount",
+            "source": source,
+            **values,
+        }
+    )
+
+
+def headcount_missing_decision(campaign: Campaign, contact: Contact | None, party_info: dict[str, object], reason: str = "", source: str = "local") -> dict[str, object]:
+    values = party_values_for_decision(party_info)
+    return normalize_ai_decision(
+        {
+            "action": "mark_rsvp",
+            "digit": "1",
+            "rsvp": "attending_needs_headcount",
+            "status": "attending_needs_headcount",
+            "text": render_for_contact(campaign, contact, script_value(campaign, "headcount_missing_script"), values),
+            "reason": reason or "attending response did not include a usable headcount",
+            "source": source,
+            **values,
+        }
+    )
+
+
 def thanks_for_digit(campaign: Campaign, contact: Contact | None, digit: str) -> str:
     field = {
         "1": "thanks_attending_script",
@@ -280,6 +494,21 @@ def normalize_ai_decision(raw: dict[str, object], fallback_text: str = "") -> di
         decision["digit"] = ""
     if "listen_ms" in decision:
         decision["listen_ms"] = clamp_int(decision.get("listen_ms"), 7000, 1000, 20000)
+    if "collect_digits" in decision:
+        decision["collect_digits"] = clamp_int(decision.get("collect_digits"), 1, 1, 2)
+    for field in ["party_size", "party_kids", "party_friends", "party_family"]:
+        if field in decision:
+            parsed = optional_int(decision.get(field), 1 if field == "party_size" else 0, 99)
+            if parsed is None:
+                decision.pop(field, None)
+            else:
+                decision[field] = parsed
+    if "party_details" in decision:
+        details = str(decision.get("party_details") or "").strip()
+        if details:
+            decision["party_details"] = details[:500]
+        else:
+            decision.pop("party_details", None)
     decision["hangup_after"] = bool(decision.get("hangup_after")) if "hangup_after" in decision else action in {"leave_voicemail", "mark_rsvp", "complete", "hangup"}
     return decision
 
@@ -303,7 +532,20 @@ def local_ai_decision(campaign: Campaign, contact: Contact | None, payload: dict
                 "source": source,
             }
         )
-    if stage in {"answer_observed", "dtmf_response", "human_response"} and classified_digit:
+    if stage == "attending_followup":
+        party_info = parse_party_info(transcript, digit)
+        if party_info.get("party_size"):
+            return attending_done_decision(campaign, contact, party_info, reason or "captured catering headcount", source)
+        if turn < max(campaign.ai_max_turns or 3, 3):
+            return attending_followup_decision(campaign, contact, reason or "headcount response was unclear", source)
+        return headcount_missing_decision(campaign, contact, party_info, reason or "headcount response missing after follow-up", source)
+
+    if stage in {"answer_observed", "dtmf_response", "human_response", "rsvp_response"} and classified_digit:
+        if classified_digit == "1":
+            party_info = parse_party_info(transcript, "")
+            if party_info.get("party_size"):
+                return attending_done_decision(campaign, contact, party_info, reason or "initial spoken response included headcount", source)
+            return attending_followup_decision(campaign, contact, reason or "contact said they are attending", source)
         return normalize_ai_decision(
             {
                 "action": "mark_rsvp",
@@ -315,7 +557,7 @@ def local_ai_decision(campaign: Campaign, contact: Contact | None, payload: dict
                 "source": source,
             }
         )
-    if stage == "human_response" and turn >= (campaign.ai_max_turns or 3):
+    if stage in {"human_response", "rsvp_response"} and turn >= (campaign.ai_max_turns or 3):
         return normalize_ai_decision(
             {
                 "action": "complete",
@@ -327,7 +569,7 @@ def local_ai_decision(campaign: Campaign, contact: Contact | None, payload: dict
         )
     text = (
         render_for_contact(campaign, contact, script_value(campaign, "voice_prompt_script"))
-        if stage == "human_response"
+        if stage in {"human_response", "rsvp_response"}
         else render_for_contact(campaign, contact, script_value(campaign, "intro_script"))
     )
     return normalize_ai_decision(
@@ -346,7 +588,13 @@ def call_flowise(campaign: Campaign, contact: Contact | None, payload: dict[str,
     if clean_ai_provider(campaign.ai_provider) != "flowise" or not campaign.flowise_chatflow_id:
         return None, "Flowise provider is not configured"
     question = {
-        "instruction": "Return one JSON object with action, text, digit, status, reason, listen_ms, and hangup_after. Do not wrap it in markdown.",
+        "instruction": (
+            "Return one JSON object with action, text, digit, status, reason, listen_ms, hangup_after, "
+            "next_stage, collect_digits, party_size, party_kids, party_friends, party_family, and party_details. "
+            "If the contact says they are attending but no total headcount is known, return action=speak_and_listen, "
+            "next_stage=attending_followup, collect_digits=2, and ask for the total number coming plus kids/friends/family details. "
+            "Only mark status=attending after party_size is known. Do not wrap it in markdown."
+        ),
         "campaign": campaign.name,
         "event_context": campaign.ai_event_context or DEFAULT_AI_EVENT_CONTEXT,
         "system_prompt": campaign.ai_system_prompt or DEFAULT_AI_SYSTEM_PROMPT,
@@ -354,6 +602,7 @@ def call_flowise(campaign: Campaign, contact: Contact | None, payload: dict[str,
         "call_state": payload,
         "valid_actions": ["leave_voicemail", "speak_and_listen", "mark_rsvp", "complete", "hangup"],
         "valid_digits": {"1": "attending", "2": "not_attending", "3": "unsure", "9": "callback_requested"},
+        "valid_statuses": STATUSES,
     }
     headers = {"Content-Type": "application/json"}
     api_key = (campaign.flowise_api_key or os.getenv("FLOWISE_API_KEY") or "").strip()
@@ -502,6 +751,11 @@ def contact_dict(contact: Contact) -> dict[str, object]:
         "status": contact.status,
         "attempts": contact.attempts,
         "last_digit": contact.last_digit,
+        "party_size": contact.party_size,
+        "party_kids": contact.party_kids,
+        "party_friends": contact.party_friends,
+        "party_family": contact.party_family,
+        "party_details": contact.party_details,
         "next_call_at": contact.next_call_at,
         "notes": contact.notes,
     }
@@ -534,6 +788,11 @@ def log_dict(attempt: CallAttempt, contact: Contact | None) -> dict[str, object]
         "sip_last_response_at": attempt.sip_last_response_at,
         "ai_decision": attempt.ai_decision,
         "ai_trace": attempt.ai_trace,
+        "party_size": attempt.party_size,
+        "party_kids": attempt.party_kids,
+        "party_friends": attempt.party_friends,
+        "party_family": attempt.party_family,
+        "party_details": attempt.party_details,
         "created_at": attempt.created_at,
         "completed_at": attempt.completed_at,
     }
@@ -565,6 +824,7 @@ def recent_logs(
             | CallAttempt.transcript.ilike(pattern)
             | CallAttempt.ai_decision.ilike(pattern)
             | CallAttempt.ai_trace.ilike(pattern)
+            | CallAttempt.party_details.ilike(pattern)
         )
     sort_column = CallAttempt.created_at.asc() if order == "oldest" else CallAttempt.created_at.desc()
     attempts = db.scalars(query.order_by(sort_column).limit(limit)).all()
@@ -660,6 +920,11 @@ def import_csv(content: str, db: Session, campaign_id: str) -> dict[str, int]:
         name = (row.get("name") or "").strip()
         phone = (row.get("phone") or "").strip()
         notes = (row.get("notes") or "").strip() or None
+        party_size = optional_int(row.get("party_size"), 1, 99)
+        party_kids = optional_int(row.get("party_kids"), 0, 99)
+        party_friends = optional_int(row.get("party_friends"), 0, 99)
+        party_family = optional_int(row.get("party_family"), 0, 99)
+        party_details = (row.get("party_details") or "").strip() or None
         if not name or not phone:
             skipped += 1
             continue
@@ -667,11 +932,28 @@ def import_csv(content: str, db: Session, campaign_id: str) -> dict[str, int]:
         if existing:
             existing.name = name
             existing.notes = notes
+            existing.party_size = party_size
+            existing.party_kids = party_kids
+            existing.party_friends = party_friends
+            existing.party_family = party_family
+            existing.party_details = party_details
             existing.updated_at = now_utc()
             db.commit()
             updated += 1
             continue
-        db.add(Contact(campaign_id=campaign_id, name=name, phone=phone, notes=notes))
+        db.add(
+            Contact(
+                campaign_id=campaign_id,
+                name=name,
+                phone=phone,
+                notes=notes,
+                party_size=party_size,
+                party_kids=party_kids,
+                party_friends=party_friends,
+                party_family=party_family,
+                party_details=party_details,
+            )
+        )
         try:
             db.commit()
             imported += 1
@@ -699,6 +981,10 @@ def help_button(text: str) -> str:
 
 def field_label(text: str, help_text: str) -> str:
     return f'<span>{escape(text)} {help_button(help_text)}</span>'
+
+
+def int_value(value: int | None) -> str:
+    return "" if value is None else str(value)
 
 
 def render_admin(
@@ -755,8 +1041,9 @@ def render_admin(
         ("AI Brain", "On" if campaign.ai_enabled else "Off", "good" if campaign.ai_enabled else "muted"),
         ("AI Provider", AI_PROVIDERS.get(clean_ai_provider(campaign.ai_provider), "Local"), ""),
         ("Attending", str(status["contacts"]["attending"]), "good"),
+        ("Needs Headcount", str(status["contacts"]["attending_needs_headcount"]), "warn"),
         ("Not Attending", str(status["contacts"]["not_attending"]), "bad"),
-        ("Needs Followup", str(status["contacts"]["unsure"] + status["contacts"]["callback_requested"] + status["contacts"]["voice_response"] + status["contacts"]["no_response"]), "warn"),
+        ("Needs Followup", str(status["contacts"]["attending_needs_headcount"] + status["contacts"]["unsure"] + status["contacts"]["callback_requested"] + status["contacts"]["voice_response"] + status["contacts"]["no_response"]), "warn"),
     ]
     cards_html = "\n".join(f'<div class="stat {css}"><span>{escape(label)}</span><strong>{escape(value)}</strong></div>' for label, value, css in status_cards)
 
@@ -771,6 +1058,11 @@ def render_admin(
               <td><form id="edit-{escape(contact.id)}" action="contacts/{escape(contact.id)}/update" method="post"></form><input form="edit-{escape(contact.id)}" name="name" value="{escape(contact.name)}" aria-label="Contact name" required><input form="edit-{escape(contact.id)}" type="hidden" name="campaign_id" value="{escape(campaign.id)}"></td>
               <td><input form="edit-{escape(contact.id)}" name="phone" value="{escape(contact.phone)}" aria-label="Contact phone" required></td>
               <td><select form="edit-{escape(contact.id)}" name="status" aria-label="Contact status">{options}</select></td>
+              <td class="num"><input form="edit-{escape(contact.id)}" class="small-num" type="number" min="1" max="99" name="party_size" value="{escape(int_value(contact.party_size))}" aria-label="Total party size"></td>
+              <td class="num"><input form="edit-{escape(contact.id)}" class="small-num" type="number" min="0" max="99" name="party_kids" value="{escape(int_value(contact.party_kids))}" aria-label="Kids count"></td>
+              <td class="num"><input form="edit-{escape(contact.id)}" class="small-num" type="number" min="0" max="99" name="party_friends" value="{escape(int_value(contact.party_friends))}" aria-label="Friends count"></td>
+              <td class="num"><input form="edit-{escape(contact.id)}" class="small-num" type="number" min="0" max="99" name="party_family" value="{escape(int_value(contact.party_family))}" aria-label="Other family count"></td>
+              <td><input form="edit-{escape(contact.id)}" name="party_details" value="{escape(contact.party_details or "")}" aria-label="Party details"></td>
               <td class="num">{contact.attempts}</td><td class="num">{escape(contact.last_digit or "")}</td><td>{escape(format_dt(contact.next_call_at))}</td>
               <td><input form="edit-{escape(contact.id)}" name="notes" value="{escape(contact.notes or "")}" aria-label="Contact notes"></td>
               <td class="actions"><button form="edit-{escape(contact.id)}" type="submit">Save</button>
@@ -778,7 +1070,7 @@ def render_admin(
                 <form action="contacts/{escape(contact.id)}/delete" method="post"><input type="hidden" name="campaign_id" value="{escape(campaign.id)}"><button class="danger" type="submit">Delete</button></form>
               </td>
             </tr>""")
-    rows_html = "\n".join(contact_rows) or '<tr><td colspan="8" class="empty">No contacts imported yet.</td></tr>'
+    rows_html = "\n".join(contact_rows) or '<tr><td colspan="13" class="empty">No contacts imported yet.</td></tr>'
 
     log_rows = []
     for item in logs:
@@ -788,9 +1080,10 @@ def render_admin(
             <td>{escape(str(item['dial_input'] or ""))}</td><td>{escape(dial_normalization_label(str(item['dial_normalization'] or "")))}</td><td>{escape(str(item['dialed_number'] or ""))}</td>
             <td>{escape(str(item['caller_id_number'] or ""))}</td><td>{escape(str(item['sip_to'] or ""))}</td><td>{escape(str(item['sip_from'] or ""))}</td>
             <td>{escape(str(item['sip_route'] or ""))}</td><td>{escape(str(item['sip_last_response'] or ""))}</td><td>{escape(str(item['status'] or ""))}</td><td class="num">{escape(str(item['digit'] or ""))}</td>
+            <td class="num">{escape(str(item['party_size'] or ""))}</td><td class="num">{escape(str(item['party_kids'] if item['party_kids'] is not None else ""))}</td><td class="num">{escape(str(item['party_friends'] if item['party_friends'] is not None else ""))}</td><td class="num">{escape(str(item['party_family'] if item['party_family'] is not None else ""))}</td><td>{escape(str(item['party_details'] or ""))}</td>
             <td>{escape(str(item['amd_status'] or ""))}</td><td>{escape(str(item['transcript'] or ""))}</td><td>{escape(str(item['ai_decision'] or ""))}</td><td>{escape(str(item['ai_trace'] or ""))}</td><td>{recording_link(item['voice_recording'])}</td>
             <td>{escape(str(item['message'] or ""))}</td></tr>""")
-    logs_html = "\n".join(log_rows) or '<tr><td colspan="20" class="empty">No call attempts logged yet.</td></tr>'
+    logs_html = "\n".join(log_rows) or '<tr><td colspan="25" class="empty">No call attempts logged yet.</td></tr>'
 
     event_rows = []
     for event in events:
@@ -930,7 +1223,7 @@ def render_admin(
           <span id="contact-refresh-state" class="refresh-status"></span>
         </form>
       </section>
-      <section><div class="scroll"><table><thead><tr><th>Name</th><th>Phone</th><th>Status</th><th>Attempts</th><th>Digit</th><th>Next Call</th><th>Notes</th><th>Actions</th></tr></thead><tbody>{rows_html}</tbody></table></div></section>"""
+      <section><div class="scroll"><table><thead><tr><th>Name</th><th>Phone</th><th>Status</th><th>Total</th><th>Kids</th><th>Friends</th><th>Family</th><th>Party Details</th><th>Attempts</th><th>Digit</th><th>Next Call</th><th>Notes</th><th>Actions</th></tr></thead><tbody>{rows_html}</tbody></table></div></section>"""
 
     logs_section = f"""
       <section class="panel table-toolbar">
@@ -947,7 +1240,7 @@ def render_admin(
           <span class="table-timestamp">Last refreshed {escape(refreshed_at)}</span>
         </form>
       </section>
-      <section><div class="scroll"><table><thead><tr><th>Created</th><th>Completed</th><th>Name</th><th>Contact Phone</th><th>Dial Input</th><th>Format</th><th>Dialed</th><th>Caller ID</th><th>SIP To</th><th>SIP From</th><th>SIP Route</th><th>Last SIP Response</th><th>Status</th><th>Digit</th><th>AMD</th><th>Transcript</th><th>AI Decision</th><th>AI Trace</th><th>Recording</th><th>Message</th></tr></thead><tbody>{logs_html}</tbody></table></div></section>
+      <section><div class="scroll"><table><thead><tr><th>Created</th><th>Completed</th><th>Name</th><th>Contact Phone</th><th>Dial Input</th><th>Format</th><th>Dialed</th><th>Caller ID</th><th>SIP To</th><th>SIP From</th><th>SIP Route</th><th>Last SIP Response</th><th>Status</th><th>Digit</th><th>Total</th><th>Kids</th><th>Friends</th><th>Family</th><th>Party Details</th><th>AMD</th><th>Transcript</th><th>AI Decision</th><th>AI Trace</th><th>Recording</th><th>Message</th></tr></thead><tbody>{logs_html}</tbody></table></div></section>
     """
     voice_section = f"""
       <section class="panel">
@@ -957,7 +1250,9 @@ def render_admin(
           <label>{field_label("Intro Script", "Main message played to a human answer. You can use {contact_name}.")}<textarea name="intro_script" rows="5">{escape(script_value(campaign, "intro_script"))}</textarea></label>
           <label>{field_label("Voicemail Script", "Message left when AMD classifies the answer as voicemail.")}<textarea name="voicemail_script" rows="3">{escape(script_value(campaign, "voicemail_script"))}</textarea></label>
           <label>{field_label("Voice Answer Prompt", "Prompt played when no DTMF digit is pressed before recording a spoken answer.")}<textarea name="voice_prompt_script" rows="2">{escape(script_value(campaign, "voice_prompt_script"))}</textarea></label>
-          <label>{field_label("Thank You: Attending", "Played after digit 1 or a transcript classified as yes/attending.")}<textarea name="thanks_attending_script" rows="2">{escape(script_value(campaign, "thanks_attending_script"))}</textarea></label>
+          <label>{field_label("Attending Follow-Up", "Played after someone says yes or presses 1. Ask for total headcount and kids/friends/family details.")}<textarea name="attending_followup_script" rows="3">{escape(script_value(campaign, "attending_followup_script"))}</textarea></label>
+          <label>{field_label("Thank You: Attending", "Played after the total headcount is captured. You can use {party_size}.")}<textarea name="thanks_attending_script" rows="2">{escape(script_value(campaign, "thanks_attending_script"))}</textarea></label>
+          <label>{field_label("Headcount Missing", "Played when someone said they are attending but did not provide a usable total headcount.")}<textarea name="headcount_missing_script" rows="2">{escape(script_value(campaign, "headcount_missing_script"))}</textarea></label>
           <label>{field_label("Thank You: Not Attending", "Played after digit 2 or a transcript classified as no/not attending.")}<textarea name="thanks_not_attending_script" rows="2">{escape(script_value(campaign, "thanks_not_attending_script"))}</textarea></label>
           <label>{field_label("Thank You: Unsure", "Played after digit 3 or a transcript classified as maybe/unsure.")}<textarea name="thanks_unsure_script" rows="2">{escape(script_value(campaign, "thanks_unsure_script"))}</textarea></label>
           <label>{field_label("Thank You: Callback", "Played after digit 9 or a transcript classified as call me back.")}<textarea name="thanks_callback_script" rows="2">{escape(script_value(campaign, "thanks_callback_script"))}</textarea></label>
@@ -978,7 +1273,7 @@ def render_admin(
             <label>{field_label("Observe Milliseconds", "Set 0 for fast-start speech immediately after answer. Higher values record/transcribe before the first prompt for voicemail detection.")}<input name="ai_observe_ms" value="{campaign.ai_observe_ms}"></label>
             <label>{field_label("Listen Milliseconds", "Speech listen window after each AI prompt.")}<input name="ai_listen_ms" value="{campaign.ai_listen_ms}"></label>
             <label>{field_label("Max Turns", "Maximum AI listen/speak cycles before no-response handling.")}<input name="ai_max_turns" value="{campaign.ai_max_turns}"></label>
-            <label>{field_label("Flowise URL", "Prediction endpoint, usually http://gaid:3000/api/v1/prediction.")}<input name="flowise_api_url" value="{escape(campaign.flowise_api_url or '')}"></label>
+            <label class="wide">{field_label("Flowise URL", "Prediction endpoint, usually http://gaid:3000/api/v1/prediction.")}<input name="flowise_api_url" value="{escape(campaign.flowise_api_url or '')}"></label>
             <label>{field_label("Flowise Chatflow ID", "Flowise chatflow ID used for call-brain decisions.")}<input name="flowise_chatflow_id" value="{escape(campaign.flowise_chatflow_id or '')}"></label>
             <label>{field_label("Flowise API Key", "Optional bearer token for the Flowise prediction API.")}<input type="password" name="flowise_api_key" value="{escape(campaign.flowise_api_key or '')}"></label>
             <label>{field_label("Flowise Username", "Optional HTTP basic username if Flowise basic auth is enabled.")}<input name="flowise_username" value="{escape(campaign.flowise_username or '')}"></label>
@@ -1121,6 +1416,11 @@ input,select,button,textarea {{ font:inherit; font-size:14px; }}
 input,select,textarea {{ box-sizing:border-box; width:100%; max-width:100%; min-width:0; padding:7px 8px; border:1px solid #bac4cf; border-radius:4px; background:white; }}
 input[type="checkbox"],input[type="radio"] {{ width:auto; }}
 textarea {{ min-height:44px; resize:vertical; line-height:1.35; }}
+.small-num {{ width:72px; min-width:60px; text-align:right; }}
+td input[name="name"] {{ min-width:150px; }}
+td input[name="phone"] {{ min-width:122px; }}
+td select[name="status"] {{ min-width:190px; }}
+td input[name="party_details"],td input[name="notes"] {{ min-width:180px; }}
 button,.button {{ border:1px solid #5d7187; background:#30475e; color:white; border-radius:4px; padding:8px 11px; text-decoration:none; cursor:pointer; white-space:nowrap; }}
 .primary-action {{ background:#147a46; border-color:#147a46; font-weight:bold; }}
 .secondary,.button.secondary {{ background:#eef2f6; color:#263238; border-color:#c6d0db; }}
@@ -1150,7 +1450,7 @@ td.num {{ text-align:right; font-variant-numeric:tabular-nums; }}
 label {{ display:grid; gap:5px; color:#4f5b68; font-size:13px; }}
 label span {{ display:flex; gap:5px; align-items:center; }}
 code {{ white-space:pre-wrap; font-family:Consolas,monospace; font-size:12px; }}
-@media (max-width:900px) {{ main {{ padding:18px 12px; }} table {{ min-width:980px; }} .script-form,.builder-form,.command-bar {{ grid-template-columns:1fr; }} }}
+@media (max-width:900px) {{ main {{ padding:18px 12px; }} table {{ min-width:1180px; }} .script-form,.builder-form,.command-bar {{ grid-template-columns:1fr; }} }}
 </style></head>
 <body><header><h1>Devin's Out Caller</h1><form action="./" method="get" class="inline"><label>{field_label("Campaign", "Select which campaign's contacts, settings, and logs are shown.")}<select name="campaign_id">{campaign_options}</select></label><input type="hidden" name="tab" value="{escape(tab)}"><button class="secondary" type="submit">Open</button></form></header>
 <main>{msg_html}{command_bar}<div class="tabs">{tabs}</div>{export_bar}{body_section}</main>{auto_refresh_script}</body></html>"""
@@ -1293,7 +1593,9 @@ def update_voice_script(
     intro_script: str = Form(""),
     voicemail_script: str = Form(""),
     voice_prompt_script: str = Form(""),
+    attending_followup_script: str = Form(""),
     thanks_attending_script: str = Form(""),
+    headcount_missing_script: str = Form(""),
     thanks_not_attending_script: str = Form(""),
     thanks_unsure_script: str = Form(""),
     thanks_callback_script: str = Form(""),
@@ -1305,7 +1607,9 @@ def update_voice_script(
         "intro_script": intro_script,
         "voicemail_script": voicemail_script,
         "voice_prompt_script": voice_prompt_script,
+        "attending_followup_script": attending_followup_script,
         "thanks_attending_script": thanks_attending_script,
+        "headcount_missing_script": headcount_missing_script,
         "thanks_not_attending_script": thanks_not_attending_script,
         "thanks_unsure_script": thanks_unsure_script,
         "thanks_callback_script": thanks_callback_script,
@@ -1391,8 +1695,9 @@ def ai_builder_chat(
         campaign.ai_event_context = f"{current_context}\n\n{message}".strip()
     suggestion = (
         "Builder: I added this as call-flow knowledge. The runtime will listen first, classify the answer, "
-        "ask for RSVP only after a human response, and only mark yes/no/unsure/callback when the transcript or DTMF is clear. "
-        "For Flowise, build the chatflow to return JSON with action, text, digit, status, reason, listen_ms, and hangup_after."
+        "ask for RSVP only after a human response, and ask a headcount follow-up before marking an attending RSVP complete. "
+        "For Flowise, build the chatflow to return JSON with action, text, digit, status, reason, listen_ms, hangup_after, "
+        "next_stage, collect_digits, party_size, party_kids, party_friends, party_family, and party_details."
     )
     timestamp = format_dt(now_utc())
     entry = f"[{timestamp}] You: {message}\n[{timestamp}] {suggestion}"
@@ -1424,6 +1729,8 @@ def agi_decision(payload: dict[str, object], db: Session = Depends(get_db)) -> d
     campaign_id = str(payload.get("campaign_id") or DEFAULT_CAMPAIGN_ID)
     contact_id = str(payload.get("contact_id") or "")
     attempt_id = str(payload.get("attempt_id") or "")
+    stage = str(payload.get("stage") or "")
+    turn = clamp_int(payload.get("turn"), 0, 0, 20)
     campaign = ensure_campaign(db, campaign_id)
     contact = db.get(Contact, contact_id) if contact_id else None
     attempt = db.get(CallAttempt, attempt_id) if attempt_id else None
@@ -1438,7 +1745,26 @@ def agi_decision(payload: dict[str, object], db: Session = Depends(get_db)) -> d
         if not decision:
             decision = local_ai_decision(campaign, contact, payload, flowise_error)
 
+    action = str(decision.get("action") or "")
+    status = str(decision.get("status") or "")
+    digit = str(decision.get("digit") or "")
+    if action == "speak_and_listen" and stage == "attending_followup":
+        decision["next_stage"] = "attending_followup"
+        decision["collect_digits"] = 2
+    if action == "mark_rsvp" and (digit == "1" or status == "attending"):
+        party_info = parse_party_info(str(payload.get("transcript") or ""), str(payload.get("digit") or "") if stage == "attending_followup" else "")
+        if decision.get("party_size"):
+            party_info.update(party_values_for_decision(decision))
+            decision = attending_done_decision(campaign, contact, party_info, str(decision.get("reason") or "attending headcount accepted"), str(decision.get("source") or "local"))
+        elif party_info.get("party_size"):
+            decision = attending_done_decision(campaign, contact, party_info, str(decision.get("reason") or "parsed headcount from call state"), str(decision.get("source") or "local"))
+        elif stage == "attending_followup" and turn >= max(campaign.ai_max_turns or 3, 3):
+            decision = headcount_missing_decision(campaign, contact, party_info, str(decision.get("reason") or "headcount still missing"), str(decision.get("source") or "local_guard"))
+        else:
+            decision = attending_followup_decision(campaign, contact, str(decision.get("reason") or "attending requires headcount"), str(decision.get("source") or "local_guard"))
+
     decision["listen_ms"] = clamp_int(decision.get("listen_ms"), campaign.ai_listen_ms or 7000, 1000, 20000)
+    decision["collect_digits"] = clamp_int(decision.get("collect_digits"), 1, 1, 2)
     decision["max_turns"] = campaign.ai_max_turns or 3
     decision["observe_ms"] = clamp_int(campaign.ai_observe_ms, 0, 0, 15000)
     append_ai_trace(db, attempt, payload, decision)
@@ -1471,7 +1797,21 @@ def add_contact(request: Request, campaign_id: str = Form(DEFAULT_CAMPAIGN_ID), 
 
 
 @app.post("/contacts/{contact_id}/update")
-def update_contact(request: Request, contact_id: str, campaign_id: str = Form(DEFAULT_CAMPAIGN_ID), name: str = Form(...), phone: str = Form(...), status: str = Form(...), notes: str = Form(""), db: Session = Depends(get_db)):
+def update_contact(
+    request: Request,
+    contact_id: str,
+    campaign_id: str = Form(DEFAULT_CAMPAIGN_ID),
+    name: str = Form(...),
+    phone: str = Form(...),
+    status: str = Form(...),
+    party_size: str = Form(""),
+    party_kids: str = Form(""),
+    party_friends: str = Form(""),
+    party_family: str = Form(""),
+    party_details: str = Form(""),
+    notes: str = Form(""),
+    db: Session = Depends(get_db),
+):
     contact = db.get(Contact, contact_id)
     if not contact:
         raise HTTPException(status_code=404, detail="contact not found")
@@ -1480,6 +1820,11 @@ def update_contact(request: Request, contact_id: str, campaign_id: str = Form(DE
     contact.name = name.strip()
     contact.phone = phone.strip()
     contact.status = status
+    contact.party_size = optional_int(party_size, 1, 99)
+    contact.party_kids = optional_int(party_kids, 0, 99)
+    contact.party_friends = optional_int(party_friends, 0, 99)
+    contact.party_family = optional_int(party_family, 0, 99)
+    contact.party_details = party_details.strip() or None
     contact.notes = notes.strip() or None
     contact.updated_at = now_utc()
     try:
@@ -1498,6 +1843,11 @@ def reset_contact(request: Request, contact_id: str, campaign_id: str = Form(DEF
     contact.status = "pending"
     contact.attempts = 0
     contact.last_digit = None
+    contact.party_size = None
+    contact.party_kids = None
+    contact.party_friends = None
+    contact.party_family = None
+    contact.party_details = None
     contact.next_call_at = None
     contact.updated_at = now_utc()
     db.commit()
@@ -1525,9 +1875,9 @@ def export_contacts(campaign_id: str | None = None, db: Session = Depends(get_db
     campaign = ensure_campaign(db, campaign_id)
     output = StringIO()
     writer = csv.writer(output)
-    writer.writerow(["campaign", "name", "phone", "status", "attempts", "last_digit", "next_call_at", "notes"])
+    writer.writerow(["campaign", "name", "phone", "status", "party_size", "party_kids", "party_friends", "party_family", "party_details", "attempts", "last_digit", "next_call_at", "notes"])
     for contact in db.scalars(select(Contact).where(Contact.campaign_id == campaign.id).order_by(Contact.created_at)):
-        writer.writerow([campaign.name, contact.name, contact.phone, contact.status, contact.attempts, contact.last_digit or "", format_dt(contact.next_call_at), contact.notes or ""])
+        writer.writerow([campaign.name, contact.name, contact.phone, contact.status, contact.party_size or "", contact.party_kids if contact.party_kids is not None else "", contact.party_friends if contact.party_friends is not None else "", contact.party_family if contact.party_family is not None else "", contact.party_details or "", contact.attempts, contact.last_digit or "", format_dt(contact.next_call_at), contact.notes or ""])
     return PlainTextResponse(output.getvalue(), media_type="text/csv", headers={"Content-Disposition": 'attachment; filename="out-caller-contacts.csv"'})
 
 
@@ -1555,9 +1905,9 @@ def export_logs(
     campaign = ensure_campaign(db, campaign_id)
     output = StringIO()
     writer = csv.writer(output)
-    writer.writerow(["campaign", "created_at", "completed_at", "name", "phone", "dial_input", "dial_normalization", "dialed_number", "caller_id_name", "caller_id_number", "sip_to", "sip_from", "sip_route", "sip_target", "sip_last_response", "sip_last_response_at", "status", "digit", "amd_status", "amd_cause", "transcript", "ai_decision", "ai_trace", "voice_recording", "message", "attempt_id", "contact_id"])
+    writer.writerow(["campaign", "created_at", "completed_at", "name", "phone", "dial_input", "dial_normalization", "dialed_number", "caller_id_name", "caller_id_number", "sip_to", "sip_from", "sip_route", "sip_target", "sip_last_response", "sip_last_response_at", "status", "digit", "party_size", "party_kids", "party_friends", "party_family", "party_details", "amd_status", "amd_cause", "transcript", "ai_decision", "ai_trace", "voice_recording", "message", "attempt_id", "contact_id"])
     for item in recent_logs(db, campaign.id, 500, log_order, log_status, log_filter):
-        writer.writerow([campaign.name, format_dt(item["created_at"]), format_dt(item["completed_at"]), item["name"], item["phone"], item["dial_input"] or "", item["dial_normalization"] or "", item["dialed_number"] or "", item["caller_id_name"] or "", item["caller_id_number"] or "", item["sip_to"] or "", item["sip_from"] or "", item["sip_route"] or "", item["sip_target"] or "", item["sip_last_response"] or "", format_dt(item["sip_last_response_at"]), item["status"], item["digit"] or "", item["amd_status"] or "", item["amd_cause"] or "", item["transcript"] or "", item["ai_decision"] or "", item["ai_trace"] or "", item["voice_recording"] or "", item["message"] or "", item["id"], item["contact_id"]])
+        writer.writerow([campaign.name, format_dt(item["created_at"]), format_dt(item["completed_at"]), item["name"], item["phone"], item["dial_input"] or "", item["dial_normalization"] or "", item["dialed_number"] or "", item["caller_id_name"] or "", item["caller_id_number"] or "", item["sip_to"] or "", item["sip_from"] or "", item["sip_route"] or "", item["sip_target"] or "", item["sip_last_response"] or "", format_dt(item["sip_last_response_at"]), item["status"], item["digit"] or "", item["party_size"] or "", item["party_kids"] if item["party_kids"] is not None else "", item["party_friends"] if item["party_friends"] is not None else "", item["party_family"] if item["party_family"] is not None else "", item["party_details"] or "", item["amd_status"] or "", item["amd_cause"] or "", item["transcript"] or "", item["ai_decision"] or "", item["ai_trace"] or "", item["voice_recording"] or "", item["message"] or "", item["id"], item["contact_id"]])
     return PlainTextResponse(output.getvalue(), media_type="text/csv", headers={"Content-Disposition": 'attachment; filename="out-caller-call-log.csv"'})
 
 
@@ -1630,6 +1980,12 @@ def agi_result(payload: dict[str, str | None], db: Session = Depends(get_db)) ->
     ai_decision = payload.get("ai_decision")
     ai_trace = payload.get("ai_trace")
     status_override = payload.get("status")
+    party_size = optional_int(payload.get("party_size"), 1, 99)
+    party_kids = optional_int(payload.get("party_kids"), 0, 99)
+    party_friends = optional_int(payload.get("party_friends"), 0, 99)
+    party_family = optional_int(payload.get("party_family"), 0, 99)
+    party_details = str(payload.get("party_details") or "").strip() or None
+    has_party_payload = any(str(payload.get(field) or "").strip() for field in ["party_size", "party_kids", "party_friends", "party_family", "party_details"])
     if not contact_id:
         raise HTTPException(status_code=400, detail="contact_id is required")
     contact = db.get(Contact, contact_id)
@@ -1646,6 +2002,12 @@ def agi_result(payload: dict[str, str | None], db: Session = Depends(get_db)) ->
     )
     contact.status = status_value
     contact.last_digit = digit
+    if has_party_payload:
+        contact.party_size = party_size
+        contact.party_kids = party_kids
+        contact.party_friends = party_friends
+        contact.party_family = party_family
+        contact.party_details = party_details
     contact.updated_at = now_utc()
     if attempt_id:
         attempt = db.get(CallAttempt, attempt_id)
@@ -1661,6 +2023,12 @@ def agi_result(payload: dict[str, str | None], db: Session = Depends(get_db)) ->
                 attempt.ai_decision = ai_decision
             if ai_trace:
                 attempt.ai_trace = ai_trace
+            if has_party_payload:
+                attempt.party_size = party_size
+                attempt.party_kids = party_kids
+                attempt.party_friends = party_friends
+                attempt.party_family = party_family
+                attempt.party_details = party_details
             attempt.completed_at = now_utc()
     db.commit()
     return {"status": status_value}

@@ -14,10 +14,12 @@ import requests
 
 
 DEFAULT_SCRIPTS = {
-    "intro_script": "Hi {contact_name}. This is Devin's Out Caller. Press 1 if you are attending. Press 2 if you cannot attend. Press 3 if you are not sure. Press 9 if you would like a person to call you back. Or, after the tone, say yes, no, not sure, or call me back.",
+    "intro_script": "Hi {contact_name}. This is Devin's Out Caller. Press 1 if you are attending, then stay on the line for one quick headcount question. Press 2 if you cannot attend. Press 3 if you are not sure. Press 9 if you would like a person to call you back. Or, after the tone, say yes, no, not sure, or call me back.",
     "voicemail_script": "Hello. This is Devin's Out Caller. Please call us back. Goodbye.",
     "voice_prompt_script": "Please say yes, no, not sure, or call me back after the tone.",
-    "thanks_attending_script": "Thank you. We have you marked as attending. Goodbye.",
+    "attending_followup_script": "Great. For the caterer, please enter the total number of people coming, including yourself, using one or two digits. Or, after the tone, say the total and whether you are bringing kids, friends, or other family.",
+    "thanks_attending_script": "Thank you. We have you marked as attending with a total headcount of {party_size}. Goodbye.",
+    "headcount_missing_script": "Thank you. We have you marked as attending, but we did not catch the headcount. Someone may follow up. Goodbye.",
     "thanks_not_attending_script": "Thank you. We have you marked as not attending. Goodbye.",
     "thanks_unsure_script": "Thank you. We have you marked as unsure. Goodbye.",
     "thanks_callback_script": "Thank you. Someone will call you back. Goodbye.",
@@ -171,6 +173,11 @@ def post_result(
     status: str = "",
     ai_decision: str = "",
     ai_trace: str = "",
+    party_size: str = "",
+    party_kids: str = "",
+    party_friends: str = "",
+    party_family: str = "",
+    party_details: str = "",
 ) -> None:
     base_url = os.getenv("PUBLIC_BASE_URL", "http://outdialer-api:8080").rstrip("/")
     payload = json.dumps(
@@ -186,6 +193,11 @@ def post_result(
             "status": status,
             "ai_decision": ai_decision,
             "ai_trace": ai_trace,
+            "party_size": party_size,
+            "party_kids": party_kids,
+            "party_friends": party_friends,
+            "party_family": party_family,
+            "party_details": party_details,
         }
     ).encode("utf-8")
     request = urllib.request.Request(
@@ -321,10 +333,16 @@ def enabled(value: str) -> bool:
     return str(value).lower() in {"1", "true", "yes", "on"}
 
 
-def extract_digit(response: str) -> str:
+def extract_digits(response: str, max_digits: int = 1) -> str:
     if "result=" not in response:
         return ""
     value = response.split("result=", 1)[1].split()[0]
+    digits = re.sub(r"\D", "", value)
+    return digits[:max(1, min(max_digits, 2))]
+
+
+def extract_rsvp_digit(response: str) -> str:
+    value = extract_digits(response, 1)
     return value if value in {"1", "2", "3", "9"} else ""
 
 
@@ -374,6 +392,16 @@ def decision_text(decision: dict[str, object], fallback: str) -> str:
     return text or fallback
 
 
+def decision_party_fields(decision: dict[str, object]) -> dict[str, str]:
+    return {
+        "party_size": str(decision.get("party_size") or ""),
+        "party_kids": str(decision.get("party_kids") if decision.get("party_kids") is not None else ""),
+        "party_friends": str(decision.get("party_friends") if decision.get("party_friends") is not None else ""),
+        "party_family": str(decision.get("party_family") if decision.get("party_family") is not None else ""),
+        "party_details": str(decision.get("party_details") or ""),
+    }
+
+
 def stream_text(prompt_id: str, text: str) -> None:
     if text:
         agi(f"STREAM FILE {quote(make_prompt(prompt_id, text))} \"\"")
@@ -411,9 +439,10 @@ def legacy_flow(
     intro = render_script(scripts["intro_script"], script_vars)
     prompt_file = make_prompt("rsvp-main", intro)
     response = agi(f"GET DATA {shlex.quote(prompt_file)} 10000 1")
-    digit = ""
-    if "result=" in response:
-        digit = response.split("result=", 1)[1].split()[0]
+    digit = extract_rsvp_digit(response)
+    party_size = ""
+    party_details = ""
+    status = ""
 
     valid = {"1", "2", "3", "9"}
     if digit not in valid:
@@ -429,7 +458,23 @@ def legacy_flow(
             response = f"{response}; voice={voice_recording}"
             thanks = "Sorry, we did not get a response. We may try again another time. Goodbye."
     if digit == "1":
-        thanks = render_script(scripts["thanks_attending_script"], script_vars)
+        followup = render_script(scripts["attending_followup_script"], script_vars)
+        followup_file = make_prompt("rsvp-headcount", followup)
+        headcount_response = agi(f"GET DATA {shlex.quote(followup_file)} 10000 2")
+        headcount_digits = extract_digits(headcount_response, 2)
+        if headcount_digits:
+            party_size = str(int(headcount_digits))
+            script_vars["party_size"] = party_size
+            status = "attending"
+            response = f"{response}; headcount_response={headcount_response}; party_size={party_size}"
+            thanks = render_script(scripts["thanks_attending_script"], script_vars)
+        else:
+            status = "attending_needs_headcount"
+            recording_path, headcount_recording = record_clip(recording_dir, attempt_id, "headcount", 7000, 2)
+            headcount_transcript = maybe_transcribe(recording_path if headcount_recording else "")
+            party_details = headcount_transcript
+            response = f"{response}; headcount_response={headcount_response}; headcount_voice={headcount_recording}; headcount_transcript={headcount_transcript}"
+            thanks = render_script(scripts["headcount_missing_script"], script_vars)
     elif digit == "2":
         thanks = render_script(scripts["thanks_not_attending_script"], script_vars)
     elif digit == "3":
@@ -446,9 +491,16 @@ def legacy_flow(
         response + (f"; greeting={greeting_transcript}" if greeting_transcript else ""),
         amd_status,
         amd_cause,
-        locals().get("voice_recording", "") or greeting_recording,
-        locals().get("transcript", "") or greeting_transcript,
+        locals().get("headcount_recording", "") or locals().get("voice_recording", "") or greeting_recording,
+        locals().get("headcount_transcript", "") or locals().get("transcript", "") or greeting_transcript,
+        status,
         "",
+        "",
+        party_size,
+        "",
+        "",
+        "",
+        party_details,
     )
     thanks_file = make_prompt(f"rsvp-thanks-{digit or 'none'}", thanks)
     agi(f"STREAM FILE {quote(thanks_file)} \"\"")
@@ -473,6 +525,7 @@ def run_ai_flow(
     trace: list[dict[str, object]] = []
     last_transcript = greeting_transcript
     last_recording = greeting_recording
+    last_response_stage = "answer_observed"
     turn = 0
     try:
         decision = post_decision(
@@ -518,13 +571,17 @@ def run_ai_flow(
         if action in {"mark_rsvp", "complete", "hangup"}:
             digit = str(decision.get("digit") or "")
             status = str(decision.get("status") or "")
+            party_fields = decision_party_fields(decision)
+            script_vars.update(party_fields)
             if action == "mark_rsvp" and digit not in {"1", "2", "3", "9"}:
                 digit = classify_transcript(last_transcript)
             if not status:
                 status = {"1": "attending", "2": "not_attending", "3": "unsure", "9": "callback_requested"}.get(digit, "no_response")
             if action != "hangup":
                 fallback = render_script(scripts["no_response_script"], script_vars)
-                if digit == "1":
+                if status == "attending_needs_headcount":
+                    fallback = render_script(scripts["headcount_missing_script"], script_vars)
+                elif digit == "1":
                     fallback = render_script(scripts["thanks_attending_script"], script_vars)
                 elif digit == "2":
                     fallback = render_script(scripts["thanks_not_attending_script"], script_vars)
@@ -544,6 +601,11 @@ def run_ai_flow(
                 status,
                 decision_blob,
                 trace_blob,
+                party_size=party_fields["party_size"],
+                party_kids=party_fields["party_kids"],
+                party_friends=party_fields["party_friends"],
+                party_family=party_fields["party_family"],
+                party_details=party_fields["party_details"],
             )
             if action != "hangup":
                 stream_text(f"ai-final-{digit or status}", decision_text(decision, fallback))
@@ -556,59 +618,73 @@ def run_ai_flow(
         turn += 1
         prompt_text = decision_text(decision, render_script(scripts["intro_script" if turn == 1 else "voice_prompt_script"], script_vars))
         prompt_file = make_prompt(f"ai-turn-{turn}", prompt_text)
-        response = agi(f"GET DATA {shlex.quote(prompt_file)} {int(decision.get('listen_ms') or listen_ms)} 1")
+        response_stage = str(decision.get("next_stage") or ("rsvp_response" if turn == 1 else "human_response"))
+        last_response_stage = response_stage
+        try:
+            collect_digits = max(1, min(int(decision.get("collect_digits") or 1), 2))
+        except (TypeError, ValueError):
+            collect_digits = 1
+        response = agi(f"GET DATA {shlex.quote(prompt_file)} {int(decision.get('listen_ms') or listen_ms)} {collect_digits}")
         if agi_hung_up(response):
-            hangup_decision = {"action": "complete", "status": "no_response", "reason": "caller hung up during AI prompt/listen", "source": "agi"}
+            hangup_status = "attending_needs_headcount" if response_stage == "attending_followup" else "no_response"
+            hangup_digit = "1" if response_stage == "attending_followup" else ""
+            hangup_decision = {"action": "complete", "status": hangup_status, "digit": hangup_digit, "reason": "caller hung up during AI prompt/listen", "source": "agi"}
             append_trace(trace, "caller_hangup", hangup_decision, last_transcript, "", last_recording)
             post_result(
                 contact_id,
                 attempt_id,
-                "",
+                hangup_digit,
                 f"AI caller hangup during prompt/listen; greeting={greeting_transcript}; response={last_transcript}",
                 amd_status,
                 amd_cause,
                 last_recording,
                 last_transcript,
-                "no_response",
+                hangup_status,
                 json.dumps(hangup_decision, ensure_ascii=True, separators=(",", ":")),
                 json.dumps(trace[-20:], ensure_ascii=True),
+                party_details="Caller hung up before headcount." if response_stage == "attending_followup" else "",
             )
             return True
-        digit = extract_digit(response)
+        digit = extract_digits(response, collect_digits)
+        if response_stage != "attending_followup" and digit not in {"1", "2", "3", "9"}:
+            digit = ""
         if digit:
-            payload = decision_payload(campaign_id, contact_id, attempt_id, contact_name, "dtmf_response", turn, "", answer_class, digit)
+            payload = decision_payload(campaign_id, contact_id, attempt_id, contact_name, response_stage, turn, "", answer_class, digit)
             try:
                 decision = post_decision(payload)
             except Exception as exc:
                 decision = {"action": "complete", "status": "no_response", "reason": f"AI decision failed after DTMF: {exc}"}
-            append_trace(trace, "dtmf_response", decision, "", digit, "")
+            append_trace(trace, response_stage, decision, "", digit, "")
             continue
 
         recording_path, voice_recording = record_clip(recording_dir, attempt_id, f"ai-turn-{turn}", int(decision.get("listen_ms") or listen_ms), 2)
         transcript = maybe_transcribe(recording_path if voice_recording else "")
         last_transcript = transcript or last_transcript
         last_recording = voice_recording or last_recording
-        payload = decision_payload(campaign_id, contact_id, attempt_id, contact_name, "human_response", turn, transcript, answer_class, "")
+        payload = decision_payload(campaign_id, contact_id, attempt_id, contact_name, response_stage, turn, transcript, answer_class, "")
         try:
             decision = post_decision(payload)
         except Exception as exc:
             decision = {"action": "complete", "status": "no_response", "reason": f"AI decision failed after speech: {exc}"}
-        append_trace(trace, "human_response", decision, transcript, "", voice_recording)
+        append_trace(trace, response_stage, decision, transcript, "", voice_recording)
 
-    fallback_decision = {"action": "complete", "status": "no_response", "reason": "AI max turns exhausted"}
-    stream_text("ai-max-turns", render_script(scripts["no_response_script"], script_vars))
+    fallback_status = "attending_needs_headcount" if last_response_stage == "attending_followup" else "no_response"
+    fallback_digit = "1" if last_response_stage == "attending_followup" else ""
+    fallback_decision = {"action": "complete", "status": fallback_status, "digit": fallback_digit, "reason": "AI max turns exhausted"}
+    stream_text("ai-max-turns", render_script(scripts["headcount_missing_script" if fallback_status == "attending_needs_headcount" else "no_response_script"], script_vars))
     post_result(
         contact_id,
         attempt_id,
-        "",
+        fallback_digit,
         f"AI max turns exhausted; greeting={greeting_transcript}; response={last_transcript}",
         amd_status,
         amd_cause,
         last_recording,
         last_transcript,
-        "no_response",
+        fallback_status,
         json.dumps(fallback_decision, ensure_ascii=True, separators=(",", ":")),
         json.dumps(trace[-20:], ensure_ascii=True),
+        party_details="Headcount not captured before max turns." if fallback_status == "attending_needs_headcount" else "",
     )
     return True
 
@@ -626,6 +702,11 @@ def main() -> None:
         "campaign_id": campaign_id,
         "contact_name": contact_name or "there",
         "callback_number": callback_number,
+        "party_size": "",
+        "party_kids": "",
+        "party_friends": "",
+        "party_family": "",
+        "party_details": "",
     }
     recording_dir = Path(os.getenv("VOICE_RECORDING_DIR", "/var/spool/asterisk/recording"))
     recording_dir.mkdir(parents=True, exist_ok=True)
