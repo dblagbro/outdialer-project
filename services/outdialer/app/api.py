@@ -157,7 +157,7 @@ def apply_script_defaults(campaign: Campaign) -> None:
     if not getattr(campaign, "ai_system_prompt", None):
         campaign.ai_system_prompt = DEFAULT_AI_SYSTEM_PROMPT
     if getattr(campaign, "flowise_api_url", None) is None:
-        campaign.flowise_api_url = "http://gaid:3000/api/v1/prediction"
+        campaign.flowise_api_url = "http://flowise:3000/api/v1/prediction"
 
 
 def clean_dial_normalization(value: str) -> str:
@@ -204,7 +204,7 @@ def optional_int(value: object, minimum: int = 0, maximum: int = 99) -> int | No
 
 
 def flowise_prediction_url(campaign: Campaign) -> str:
-    base_url = (campaign.flowise_api_url or os.getenv("FLOWISE_API_URL") or "http://gaid:3000/api/v1/prediction").strip().rstrip("/")
+    base_url = (campaign.flowise_api_url or os.getenv("FLOWISE_API_URL") or "http://flowise:3000/api/v1/prediction").strip().rstrip("/")
     chatflow_id = (campaign.flowise_chatflow_id or os.getenv("FLOWISE_CHATFLOW_ID") or "").strip()
     if "{chatflow_id}" in base_url:
         return base_url.replace("{chatflow_id}", quote(chatflow_id))
@@ -1273,7 +1273,7 @@ def render_admin(
             <label>{field_label("Observe Milliseconds", "Set 0 for fast-start speech immediately after answer. Higher values record/transcribe before the first prompt for voicemail detection.")}<input name="ai_observe_ms" value="{campaign.ai_observe_ms}"></label>
             <label>{field_label("Listen Milliseconds", "Speech listen window after each AI prompt.")}<input name="ai_listen_ms" value="{campaign.ai_listen_ms}"></label>
             <label>{field_label("Max Turns", "Maximum AI listen/speak cycles before no-response handling.")}<input name="ai_max_turns" value="{campaign.ai_max_turns}"></label>
-            <label class="wide">{field_label("Flowise URL", "Prediction endpoint, usually http://gaid:3000/api/v1/prediction.")}<input name="flowise_api_url" value="{escape(campaign.flowise_api_url or '')}"></label>
+            <label class="wide">{field_label("Flowise URL", "Prediction endpoint, usually http://flowise:3000/api/v1/prediction.")}<input name="flowise_api_url" value="{escape(campaign.flowise_api_url or '')}"></label>
             <label>{field_label("Flowise Chatflow ID", "Flowise chatflow ID used for call-brain decisions.")}<input name="flowise_chatflow_id" value="{escape(campaign.flowise_chatflow_id or '')}"></label>
             <label>{field_label("Flowise API Key", "Optional bearer token for the Flowise prediction API.")}<input type="password" name="flowise_api_key" value="{escape(campaign.flowise_api_key or '')}"></label>
             <label>{field_label("Flowise Username", "Optional HTTP basic username if Flowise basic auth is enabled.")}<input name="flowise_username" value="{escape(campaign.flowise_username or '')}"></label>
@@ -1704,7 +1704,7 @@ def update_ai_settings(
     campaign.ai_max_turns = clamp_int(ai_max_turns, 3, 1, 8)
     campaign.ai_event_context = ai_event_context.strip() or DEFAULT_AI_EVENT_CONTEXT
     campaign.ai_system_prompt = ai_system_prompt.strip() or DEFAULT_AI_SYSTEM_PROMPT
-    campaign.flowise_api_url = flowise_api_url.strip() or "http://gaid:3000/api/v1/prediction"
+    campaign.flowise_api_url = flowise_api_url.strip() or "http://flowise:3000/api/v1/prediction"
     campaign.flowise_chatflow_id = flowise_chatflow_id.strip()
     campaign.flowise_api_key = flowise_api_key.strip()
     campaign.flowise_username = flowise_username.strip()
