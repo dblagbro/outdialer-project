@@ -1200,7 +1200,7 @@ def render_admin(
 
     settings_section = f"""
       <section class="grid2">
-        <div class="panel"><h2>Caller ID and Dialing</h2><form class="settings" action="settings" method="post"><input type="hidden" name="campaign_id" value="{escape(campaign.id)}"><label>{field_label("Caller ID Name", "Text label sent with outbound calls where Avaya allows it.")}<input name="caller_id_name" value="{escape(campaign.caller_id_name)}"></label><label>{field_label("Caller ID Number", "Outbound ANI/caller ID number to present to called parties.")}<input name="caller_id_number" value="{escape(campaign.caller_id_number)}"></label><label>{field_label("Dial Prefix", "Digits prepended after the number-format rule runs, such as 9 for an outside line.")}<input name="outbound_dial_prefix" value="{escape(campaign.outbound_dial_prefix)}"></label><label>{field_label("Number Format", "Controls how the contact phone field is converted before the dial prefix is prepended.")}<select name="dial_normalization">{dial_normalization_options}</select></label><input type="hidden" name="call_window_start" value="{escape(campaign.call_window_start)}"><input type="hidden" name="call_window_end" value="{escape(campaign.call_window_end)}"><input type="hidden" name="timezone" value="{escape(campaign.timezone)}"><input type="hidden" name="max_attempts" value="{campaign.max_attempts}"><input type="hidden" name="retry_minutes" value="{campaign.retry_minutes}"><input type="hidden" name="max_calls_per_worker_tick" value="{campaign.max_calls_per_worker_tick}"><button type="submit">Save Caller ID</button></form></div>
+        <div class="panel"><h2>Caller ID and Dialing</h2><form class="settings" action="settings" method="post"><input type="hidden" name="campaign_id" value="{escape(campaign.id)}"><label>{field_label("Caller ID Name", "Text label sent with outbound calls where Avaya allows it.")}<input name="caller_id_name" value="{escape(campaign.caller_id_name)}"></label><label>{field_label("Caller ID Number", "Outbound ANI/caller ID number to present to called parties.")}<input name="caller_id_number" value="{escape(campaign.caller_id_number)}"></label><label>{field_label("Dial Prefix", "Digits prepended after the number-format rule runs, such as 9 for an outside line.")}<input name="outbound_dial_prefix" value="{escape(campaign.outbound_dial_prefix)}"></label><label class="wide">{field_label("Number Format", "Controls how the contact phone field is converted before the dial prefix is prepended.")}<select name="dial_normalization">{dial_normalization_options}</select></label><input type="hidden" name="call_window_start" value="{escape(campaign.call_window_start)}"><input type="hidden" name="call_window_end" value="{escape(campaign.call_window_end)}"><input type="hidden" name="timezone" value="{escape(campaign.timezone)}"><input type="hidden" name="max_attempts" value="{campaign.max_attempts}"><input type="hidden" name="retry_minutes" value="{campaign.retry_minutes}"><input type="hidden" name="max_calls_per_worker_tick" value="{campaign.max_calls_per_worker_tick}"><button type="submit">Save Caller ID</button></form></div>
         <div class="panel"><h2>Schedule and Limits</h2><form class="settings" action="settings" method="post"><input type="hidden" name="campaign_id" value="{escape(campaign.id)}"><input type="hidden" name="caller_id_name" value="{escape(campaign.caller_id_name)}"><input type="hidden" name="caller_id_number" value="{escape(campaign.caller_id_number)}"><input type="hidden" name="outbound_dial_prefix" value="{escape(campaign.outbound_dial_prefix)}"><input type="hidden" name="dial_normalization" value="{escape(campaign.dial_normalization)}"><label>{field_label("Call Window Start", "Earliest local time this campaign can place calls, HH:MM.")}<input name="call_window_start" value="{escape(campaign.call_window_start)}"></label><label>{field_label("Call Window End", "Latest local time this campaign can place calls, HH:MM.")}<input name="call_window_end" value="{escape(campaign.call_window_end)}"></label><label>{field_label("Timezone", "Timezone used to evaluate the call window.")}<input name="timezone" value="{escape(campaign.timezone)}"></label><label>{field_label("Max Attempts", "Maximum attempts per contact before the worker stops retrying.")}<input name="max_attempts" value="{campaign.max_attempts}"></label><label>{field_label("Retry Minutes", "Minutes to wait before a no-response contact can be tried again.")}<input name="retry_minutes" value="{campaign.retry_minutes}"></label><label>{field_label("Calls Per Tick", "Maximum contacts queued each worker cycle for this campaign.")}<input name="max_calls_per_worker_tick" value="{campaign.max_calls_per_worker_tick}"></label><button type="submit">Save Schedule</button></form></div>
       </section>"""
 
@@ -1223,7 +1223,7 @@ def render_admin(
           <span id="contact-refresh-state" class="refresh-status"></span>
         </form>
       </section>
-      <section><div class="scroll"><table><thead><tr><th>Name</th><th>Phone</th><th>Status</th><th>Total</th><th>Kids</th><th>Friends</th><th>Family</th><th>Party Details</th><th>Attempts</th><th>Digit</th><th>Next Call</th><th>Notes</th><th>Actions</th></tr></thead><tbody>{rows_html}</tbody></table></div></section>"""
+      <section><div class="scroll contact-table"><table><thead><tr><th>Name</th><th>Phone</th><th>Status</th><th>Total</th><th>Kids</th><th>Friends</th><th>Family</th><th>Party Details</th><th>Attempts</th><th>Digit</th><th>Next Call</th><th>Notes</th><th>Actions</th></tr></thead><tbody>{rows_html}</tbody></table></div></section>"""
 
     logs_section = f"""
       <section class="panel table-toolbar">
@@ -1240,7 +1240,7 @@ def render_admin(
           <span class="table-timestamp">Last refreshed {escape(refreshed_at)}</span>
         </form>
       </section>
-      <section><div class="scroll"><table><thead><tr><th>Created</th><th>Completed</th><th>Name</th><th>Contact Phone</th><th>Dial Input</th><th>Format</th><th>Dialed</th><th>Caller ID</th><th>SIP To</th><th>SIP From</th><th>SIP Route</th><th>Last SIP Response</th><th>Status</th><th>Digit</th><th>Total</th><th>Kids</th><th>Friends</th><th>Family</th><th>Party Details</th><th>AMD</th><th>Transcript</th><th>AI Decision</th><th>AI Trace</th><th>Recording</th><th>Message</th></tr></thead><tbody>{logs_html}</tbody></table></div></section>
+      <section><div class="scroll log-table"><table><thead><tr><th>Created</th><th>Completed</th><th>Name</th><th>Contact Phone</th><th>Dial Input</th><th>Format</th><th>Dialed</th><th>Caller ID</th><th>SIP To</th><th>SIP From</th><th>SIP Route</th><th>Last SIP Response</th><th>Status</th><th>Digit</th><th>Total</th><th>Kids</th><th>Friends</th><th>Family</th><th>Party Details</th><th>AMD</th><th>Transcript</th><th>AI Decision</th><th>AI Trace</th><th>Recording</th><th>Message</th></tr></thead><tbody>{logs_html}</tbody></table></div></section>
     """
     voice_section = f"""
       <section class="panel">
@@ -1378,6 +1378,22 @@ def render_admin(
 })();
 </script>
 """.replace("CONTACT_REFRESH_SECONDS", contact_refresh).replace("CONTACT_REFRESH_CAMPAIGN", json.dumps(campaign.id))
+    responsive_table_script = """
+<script>
+(() => {
+  document.querySelectorAll(".scroll table").forEach((table) => {
+    const headers = Array.from(table.querySelectorAll("thead th")).map((th) => th.textContent.trim());
+    table.querySelectorAll("tbody tr").forEach((row) => {
+      Array.from(row.children).forEach((cell, index) => {
+        if (headers[index]) {
+          cell.setAttribute("data-label", headers[index]);
+        }
+      });
+    });
+  });
+})();
+</script>
+"""
 
     return f"""<!doctype html>
 <html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><title>Devin's Out Caller</title>
@@ -1434,6 +1450,7 @@ button,.button {{ border:1px solid #5d7187; background:#30475e; color:white; bor
 table {{ width:100%; border-collapse:collapse; background:white; border:1px solid #d7dde4; }}
 th,td {{ border-bottom:1px solid #e2e7ee; padding:9px; text-align:left; vertical-align:middle; }}
 th {{ font-size:12px; text-transform:uppercase; color:#5e6978; background:#f0f3f6; }}
+td {{ overflow-wrap:anywhere; }}
 td.num {{ text-align:right; font-variant-numeric:tabular-nums; }}
 .empty {{ text-align:center; color:#687386; padding:26px; }}
 .meta {{ color:#687386; font-size:13px; margin-top:10px; }}
@@ -1450,10 +1467,48 @@ td.num {{ text-align:right; font-variant-numeric:tabular-nums; }}
 label {{ display:grid; gap:5px; color:#4f5b68; font-size:13px; }}
 label span {{ display:flex; gap:5px; align-items:center; }}
 code {{ white-space:pre-wrap; font-family:Consolas,monospace; font-size:12px; }}
-@media (max-width:900px) {{ main {{ padding:18px 12px; }} table {{ min-width:1180px; }} .script-form,.builder-form,.command-bar {{ grid-template-columns:1fr; }} }}
+@media (max-width:1500px) {{
+  .contact-table,.log-table {{ overflow-x:visible; }}
+  .contact-table table,.contact-table thead,.contact-table tbody,.contact-table th,.contact-table td,.contact-table tr,
+  .log-table table,.log-table thead,.log-table tbody,.log-table th,.log-table td,.log-table tr {{ display:block; }}
+  .contact-table table,.log-table table {{ border:0; background:transparent; }}
+  .contact-table thead,.log-table thead {{ position:absolute; width:1px; height:1px; overflow:hidden; clip:rect(0 0 0 0); white-space:nowrap; }}
+  .contact-table tbody,.log-table tbody {{ display:grid; gap:12px; }}
+  .contact-table tr,.log-table tr {{ display:grid; grid-template-columns:repeat(auto-fit,minmax(150px,1fr)); gap:10px; background:white; border:1px solid #d7dde4; border-radius:6px; padding:12px; }}
+  .log-table tr {{ grid-template-columns:repeat(auto-fit,minmax(180px,1fr)); }}
+  .contact-table td,.log-table td {{ border:0; padding:0; display:grid; gap:4px; align-content:start; }}
+  .contact-table td::before,.log-table td::before {{ content:attr(data-label); font-size:11px; color:#5e6978; text-transform:uppercase; font-weight:bold; }}
+  .contact-table td.actions {{ grid-column:1 / -1; display:flex; flex-wrap:wrap; gap:8px; align-items:center; }}
+  .contact-table td.actions::before {{ flex:0 0 100%; }}
+  .contact-table td input,.contact-table td select {{ min-width:0; width:100%; }}
+  .contact-table .small-num {{ width:100%; min-width:0; }}
+}}
+@media (max-width:900px) {{
+  main {{ padding:18px 12px; }}
+  header {{ padding:14px 12px; }}
+  .grid2,.dashboard-grid,.script-form,.builder-form,.command-bar {{ grid-template-columns:1fr; }}
+  .scroll {{ overflow-x:visible; }}
+  .scroll table,.scroll thead,.scroll tbody,.scroll th,.scroll td,.scroll tr {{ display:block; }}
+  .scroll table {{ min-width:0; border:0; background:transparent; }}
+  .scroll thead {{ position:absolute; width:1px; height:1px; overflow:hidden; clip:rect(0 0 0 0); white-space:nowrap; }}
+  .scroll tbody {{ display:grid; gap:10px; }}
+  .scroll tr {{ display:grid; gap:6px; background:white; border:1px solid #d7dde4; border-radius:6px; padding:10px; }}
+  .scroll td {{ border:0; padding:0; display:grid; grid-template-columns:minmax(96px,34%) minmax(0,1fr); gap:8px; align-items:start; }}
+  .scroll td::before {{ content:attr(data-label); color:#5e6978; font-size:11px; text-transform:uppercase; font-weight:bold; }}
+  .scroll td.empty {{ display:block; text-align:center; padding:18px; }}
+  .scroll td.empty::before {{ content:""; }}
+  .scroll td input,.scroll td select,.scroll td textarea {{ min-width:0; width:100%; }}
+  .scroll .small-num {{ width:100%; min-width:0; }}
+  .scroll td.actions {{ grid-template-columns:1fr; gap:8px; }}
+  .scroll td.actions::before {{ display:block; }}
+  .actions form,.actions button {{ width:100%; }}
+  .contact-table tr {{ grid-template-columns:repeat(auto-fit,minmax(220px,1fr)); }}
+  .contact-table td {{ grid-template-columns:1fr; }}
+  .contact-table td.actions {{ grid-template-columns:1fr; }}
+}}
 </style></head>
 <body><header><h1>Devin's Out Caller</h1><form action="./" method="get" class="inline"><label>{field_label("Campaign", "Select which campaign's contacts, settings, and logs are shown.")}<select name="campaign_id">{campaign_options}</select></label><input type="hidden" name="tab" value="{escape(tab)}"><button class="secondary" type="submit">Open</button></form></header>
-<main>{msg_html}{command_bar}<div class="tabs">{tabs}</div>{export_bar}{body_section}</main>{auto_refresh_script}</body></html>"""
+<main>{msg_html}{command_bar}<div class="tabs">{tabs}</div>{export_bar}{body_section}</main>{auto_refresh_script}{responsive_table_script}</body></html>"""
 
 
 @app.get("/health")
