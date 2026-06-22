@@ -43,7 +43,7 @@ STATUSES = [
     "no_response",
 ]
 TRACE_LIMITS = ["10", "50", "100", "250", "500", "all"]
-TABLE_LIMITS = ["25", "50", "100", "250", "500"]
+TABLE_LIMITS = ["10", "50", "100", "250", "500", "all"]
 CONTACT_REFRESH_OPTIONS = {
     "0": "Off",
     "5": "5 sec",
@@ -832,7 +832,7 @@ def log_dict(attempt: CallAttempt, contact: Contact | None) -> dict[str, object]
 def recent_logs(
     db: Session,
     campaign_id: str,
-    limit: int = 50,
+    limit: int | None = 50,
     order: str = "newest",
     status_filter: str = "",
     text_filter: str = "",
@@ -858,7 +858,10 @@ def recent_logs(
             | CallAttempt.party_details.ilike(pattern)
         )
     sort_column = CallAttempt.created_at.asc() if order == "oldest" else CallAttempt.created_at.desc()
-    attempts = db.scalars(query.order_by(sort_column).limit(limit)).all()
+    query = query.order_by(sort_column)
+    if limit is not None:
+        query = query.limit(limit)
+    attempts = db.scalars(query).all()
     contact_ids = [attempt.contact_id for attempt in attempts]
     contacts = {}
     if contact_ids:
@@ -869,7 +872,7 @@ def recent_logs(
 def recent_events(
     db: Session,
     campaign_id: str,
-    limit: int = 80,
+    limit: int | None = 80,
     order: str = "newest",
     text_filter: str = "",
 ) -> list[EventLog]:
@@ -884,7 +887,10 @@ def recent_events(
             | EventLog.details.ilike(pattern)
         )
     sort_column = EventLog.created_at.asc() if order == "oldest" else EventLog.created_at.desc()
-    return db.scalars(query.order_by(sort_column).limit(limit)).all()
+    query = query.order_by(sort_column)
+    if limit is not None:
+        query = query.limit(limit)
+    return db.scalars(query).all()
 
 
 def get_status(db: Session, campaign_id: str) -> dict[str, object]:
@@ -1018,6 +1024,122 @@ def int_value(value: int | None) -> str:
     return "" if value is None else str(value)
 
 
+def table_limit_value(value: str) -> int | None:
+    return None if value == "all" else int(value)
+
+
+def css_slug(value: object) -> str:
+    slug = re.sub(r"[^a-z0-9]+", "-", str(value or "unknown").lower()).strip("-")
+    return slug or "unknown"
+
+
+def log_value(value: object, fallback: str = "Not recorded") -> str:
+    if value is None or value == "":
+        return f'<span class="muted-text">{escape(fallback)}</span>'
+    return escape(str(value))
+
+
+def log_field(label: str, value: object, *, mono: bool = False, wide: bool = False, raw_html: str | None = None) -> str:
+    field_classes = "log-field wide" if wide else "log-field"
+    value_classes = "log-value mono" if mono else "log-value"
+    content = raw_html if raw_html is not None else log_value(value)
+    return f'<div class="{field_classes}"><span>{escape(label)}</span><div class="{value_classes}">{content}</div></div>'
+
+
+def log_detail(label: str, value: object, *, open_by_default: bool = False) -> str:
+    if value is None or value == "":
+        return ""
+    open_attr = " open" if open_by_default else ""
+    return f'<details class="log-detail"{open_attr}><summary>{escape(label)}</summary><pre>{escape(str(value))}</pre></details>'
+
+
+def render_log_card(item: dict[str, object]) -> str:
+    status = str(item["status"] or "unknown")
+    status_label = status.replace("_", " ").title()
+    status_class = css_slug(status)
+    name = str(item["name"] or "").strip()
+    phone = str(item["phone"] or "").strip()
+    dialed = str(item["dialed_number"] or "").strip()
+    title = name or phone or dialed or "Unknown contact"
+    created = format_dt(item["created_at"])
+    completed = format_dt(item["completed_at"]) or "Not completed"
+    sip_response = str(item["sip_last_response"] or "").strip()
+    response_at = format_dt(item["sip_last_response_at"])
+    caller_id = str(item["caller_id_number"] or "").strip()
+    caller_name = str(item["caller_id_name"] or "").strip()
+    caller_display = caller_id if not caller_name else f"{caller_name} <{caller_id}>" if caller_id else caller_name
+    rsvp_bits = [
+        f"Total {item['party_size']}" if item["party_size"] else "",
+        f"kids {item['party_kids']}" if item["party_kids"] is not None else "",
+        f"friends {item['party_friends']}" if item["party_friends"] is not None else "",
+        f"family {item['party_family']}" if item["party_family"] is not None else "",
+    ]
+    rsvp_summary = ", ".join(bit for bit in rsvp_bits if bit)
+    details = "".join(
+        [
+            log_detail("Transcript", item["transcript"], open_by_default=bool(item["transcript"]) and not item["ai_trace"]),
+            log_detail("AI Decision", item["ai_decision"]),
+            log_detail("AI Trace", item["ai_trace"]),
+        ]
+    )
+    if not details:
+        details = '<div class="log-detail-empty">No transcript or AI trace recorded for this attempt.</div>'
+    return f"""
+        <article class="log-card status-{status_class}">
+          <div class="log-card-head">
+            <div class="log-title">
+              <h3>{escape(title)}</h3>
+              <div class="log-subtitle">
+                <span>Created {escape(created or "unknown")}</span>
+                <span>Completed {escape(completed)}</span>
+              </div>
+            </div>
+            <div class="log-head-meta">
+              <span class="status-badge status-{status_class}">{escape(status_label)}</span>
+              <span class="sip-response">{escape(sip_response or "No SIP response")}</span>
+            </div>
+          </div>
+          <div class="log-card-main">
+            <div class="log-group">
+              <h4>Contact & Dialing</h4>
+              <div class="log-fields">
+                {log_field("Phone", phone, mono=True)}
+                {log_field("Dial Input", item["dial_input"], mono=True)}
+                {log_field("Format", dial_normalization_label(str(item["dial_normalization"] or "")))}
+                {log_field("Dialed", dialed, mono=True)}
+                {log_field("Caller ID", caller_display, mono=True, wide=True)}
+              </div>
+            </div>
+            <div class="log-group">
+              <h4>SIP</h4>
+              <div class="log-fields">
+                {log_field("To", item["sip_to"], mono=True, wide=True)}
+                {log_field("From", item["sip_from"], mono=True, wide=True)}
+                {log_field("Route", item["sip_route"], mono=True, wide=True)}
+                {log_field("Target", item["sip_target"], mono=True)}
+                {log_field("Response At", response_at)}
+              </div>
+            </div>
+            <div class="log-group">
+              <h4>Outcome</h4>
+              <div class="log-fields">
+                {log_field("DTMF", item["digit"], mono=True)}
+                {log_field("RSVP", rsvp_summary)}
+                {log_field("Kids", item["party_kids"])}
+                {log_field("Friends", item["party_friends"])}
+                {log_field("Family", item["party_family"])}
+                {log_field("AMD", item["amd_status"])}
+                {log_field("AMD Cause", item["amd_cause"])}
+                {log_field("Recording", None, raw_html=recording_link(item["voice_recording"]) or '<span class="muted-text">Not recorded</span>')}
+                {log_field("Party Details", item["party_details"], wide=True)}
+                {log_field("Message", item["message"], wide=True)}
+              </div>
+            </div>
+          </div>
+          <div class="log-details">{details}</div>
+        </article>"""
+
+
 def render_admin(
     db: Session,
     campaign_id: str | None = None,
@@ -1049,8 +1171,8 @@ def render_admin(
         event_order = "newest"
     if log_status not in {"", *STATUSES, "queued", "originated", "failed"}:
         log_status = ""
-    logs = recent_logs(db, campaign.id, int(log_limit), log_order, log_status, log_filter)
-    events = recent_events(db, campaign.id, int(event_limit), event_order, event_filter)
+    logs = recent_logs(db, campaign.id, table_limit_value(log_limit), log_order, log_status, log_filter)
+    events = recent_events(db, campaign.id, table_limit_value(event_limit), event_order, event_filter)
     if trace_limit not in TRACE_LIMITS:
         trace_limit = "100"
     if trace_order not in {"newest", "oldest"}:
@@ -1103,18 +1225,7 @@ def render_admin(
             </tr>""")
     rows_html = "\n".join(contact_rows) or '<tr><td colspan="13" class="empty">No contacts imported yet.</td></tr>'
 
-    log_rows = []
-    for item in logs:
-        log_rows.append(f"""
-            <tr><td>{escape(format_dt(item['created_at']))}</td><td>{escape(format_dt(item['completed_at']))}</td>
-            <td>{escape(str(item['name'] or ""))}</td><td>{escape(str(item['phone'] or ""))}</td>
-            <td>{escape(str(item['dial_input'] or ""))}</td><td>{escape(dial_normalization_label(str(item['dial_normalization'] or "")))}</td><td>{escape(str(item['dialed_number'] or ""))}</td>
-            <td>{escape(str(item['caller_id_number'] or ""))}</td><td>{escape(str(item['sip_to'] or ""))}</td><td>{escape(str(item['sip_from'] or ""))}</td>
-            <td>{escape(str(item['sip_route'] or ""))}</td><td>{escape(str(item['sip_last_response'] or ""))}</td><td>{escape(str(item['status'] or ""))}</td><td class="num">{escape(str(item['digit'] or ""))}</td>
-            <td class="num">{escape(str(item['party_size'] or ""))}</td><td class="num">{escape(str(item['party_kids'] if item['party_kids'] is not None else ""))}</td><td class="num">{escape(str(item['party_friends'] if item['party_friends'] is not None else ""))}</td><td class="num">{escape(str(item['party_family'] if item['party_family'] is not None else ""))}</td><td>{escape(str(item['party_details'] or ""))}</td>
-            <td>{escape(str(item['amd_status'] or ""))}</td><td>{escape(str(item['transcript'] or ""))}</td><td>{escape(str(item['ai_decision'] or ""))}</td><td>{escape(str(item['ai_trace'] or ""))}</td><td>{recording_link(item['voice_recording'])}</td>
-            <td>{escape(str(item['message'] or ""))}</td></tr>""")
-    logs_html = "\n".join(log_rows) or '<tr><td colspan="25" class="empty">No call attempts logged yet.</td></tr>'
+    logs_html = "\n".join(render_log_card(item) for item in logs) or '<div class="empty log-empty">No call attempts logged yet.</div>'
 
     event_rows = []
     for event in events:
@@ -1271,7 +1382,7 @@ def render_admin(
           <span class="table-timestamp">Last refreshed {escape(refreshed_at)}</span>
         </form>
       </section>
-      <section><div class="scroll log-table"><table><thead><tr><th>Created</th><th>Completed</th><th>Name</th><th>Contact Phone</th><th>Dial Input</th><th>Format</th><th>Dialed</th><th>Caller ID</th><th>SIP To</th><th>SIP From</th><th>SIP Route</th><th>Last SIP Response</th><th>Status</th><th>Digit</th><th>Total</th><th>Kids</th><th>Friends</th><th>Family</th><th>Party Details</th><th>AMD</th><th>Transcript</th><th>AI Decision</th><th>AI Trace</th><th>Recording</th><th>Message</th></tr></thead><tbody>{logs_html}</tbody></table></div></section>
+      <section class="log-cards" aria-label="Call attempts">{logs_html}</section>
     """
     voice_section = f"""
       <section class="panel">
@@ -1498,6 +1609,35 @@ td.num {{ text-align:right; font-variant-numeric:tabular-nums; }}
 label {{ display:grid; gap:5px; color:#4f5b68; font-size:13px; }}
 label span {{ display:flex; gap:5px; align-items:center; }}
 code {{ white-space:pre-wrap; font-family:Consolas,monospace; font-size:12px; }}
+.muted-text,.log-detail-empty {{ color:#687386; }}
+.log-cards {{ display:grid; gap:12px; }}
+.log-empty {{ background:white; border:1px solid #d7dde4; border-radius:6px; }}
+.log-card {{ background:white; border:1px solid #d7dde4; border-left:5px solid #687386; border-radius:6px; padding:14px; display:grid; gap:12px; min-width:0; }}
+.log-card.status-failed {{ border-left-color:#a43737; }}
+.log-card.status-attending {{ border-left-color:#147a46; }}
+.log-card.status-attending-needs-headcount,.log-card.status-unsure,.log-card.status-callback-requested,.log-card.status-voice-response {{ border-left-color:#b57a00; }}
+.log-card-head {{ display:grid; grid-template-columns:minmax(260px,1fr) minmax(260px,auto); gap:12px; align-items:start; min-width:0; }}
+.log-title h3 {{ margin:0; font-size:16px; line-height:1.25; }}
+.log-subtitle {{ margin-top:4px; display:flex; gap:4px 14px; flex-wrap:wrap; color:#687386; font-size:12px; }}
+.log-head-meta {{ display:flex; justify-content:flex-end; align-items:flex-start; flex-wrap:wrap; gap:8px; min-width:0; }}
+.status-badge {{ border-radius:999px; padding:5px 9px; font-size:12px; font-weight:bold; background:#eef2f6; color:#4f5b68; white-space:nowrap; }}
+.status-badge.status-failed {{ background:#fdecec; color:#8b2d2d; }}
+.status-badge.status-attending {{ background:#dff3e8; color:#0f6b3d; }}
+.status-badge.status-attending-needs-headcount,.status-badge.status-unsure,.status-badge.status-callback-requested,.status-badge.status-voice-response {{ background:#fff2d8; color:#7a5300; }}
+.sip-response {{ max-width:560px; border:1px solid #d7dde4; background:#f8fafb; border-radius:5px; padding:5px 8px; font-family:Consolas,monospace; font-size:12px; line-height:1.35; overflow-wrap:anywhere; }}
+.log-card-main {{ display:grid; grid-template-columns:minmax(230px,.85fr) minmax(320px,1.25fr) minmax(270px,1fr); gap:14px 18px; align-items:start; min-width:0; }}
+.log-group {{ display:grid; gap:8px; align-content:start; min-width:0; }}
+.log-group h4 {{ margin:0; color:#4f5b68; font-size:12px; text-transform:uppercase; }}
+.log-fields {{ display:grid; grid-template-columns:repeat(2,minmax(0,1fr)); gap:8px 10px; min-width:0; }}
+.log-field {{ display:grid; gap:3px; align-content:start; min-width:0; }}
+.log-field.wide {{ grid-column:1 / -1; }}
+.log-field > span {{ color:#687386; font-size:11px; font-weight:bold; text-transform:uppercase; }}
+.log-value {{ min-width:0; line-height:1.32; overflow-wrap:anywhere; word-break:break-word; }}
+.log-value.mono,.mono {{ font-family:Consolas,monospace; font-size:12px; }}
+.log-details {{ border-top:1px solid #e2e7ee; padding-top:10px; display:grid; grid-template-columns:repeat(auto-fit,minmax(280px,1fr)); gap:10px; min-width:0; }}
+.log-detail {{ min-width:0; }}
+.log-detail summary {{ cursor:pointer; color:#4f5b68; font-size:12px; font-weight:bold; text-transform:uppercase; }}
+.log-detail pre {{ margin:7px 0 0; max-height:230px; overflow:auto; white-space:pre-wrap; overflow-wrap:anywhere; word-break:break-word; background:#f8fafb; border:1px solid #d7dde4; border-radius:5px; padding:9px; font-family:Consolas,monospace; font-size:12px; line-height:1.35; }}
 @media (max-width:1500px) {{
   .contact-table,.log-table {{ overflow-x:visible; }}
   .contact-table table,.contact-table thead,.contact-table tbody,.contact-table th,.contact-table td,.contact-table tr,
@@ -1513,6 +1653,11 @@ code {{ white-space:pre-wrap; font-family:Consolas,monospace; font-size:12px; }}
   .contact-table td.actions::before {{ flex:0 0 100%; }}
   .contact-table td input,.contact-table td select {{ min-width:0; width:100%; }}
   .contact-table .small-num {{ width:100%; min-width:0; }}
+}}
+@media (max-width:1180px) {{
+  .log-card-main {{ grid-template-columns:minmax(260px,1fr) minmax(320px,1.2fr); }}
+  .log-group:nth-child(3) {{ grid-column:1 / -1; }}
+  .log-group:nth-child(3) .log-fields {{ grid-template-columns:repeat(4,minmax(0,1fr)); }}
 }}
 @media (max-width:900px) {{
   main {{ padding:18px 12px; }}
@@ -1536,6 +1681,13 @@ code {{ white-space:pre-wrap; font-family:Consolas,monospace; font-size:12px; }}
   .contact-table tr {{ grid-template-columns:repeat(auto-fit,minmax(220px,1fr)); }}
   .contact-table td {{ grid-template-columns:1fr; }}
   .contact-table td.actions {{ grid-template-columns:1fr; }}
+}}
+@media (max-width:720px) {{
+  .log-card-head,.log-card-main {{ grid-template-columns:1fr; }}
+  .log-head-meta {{ justify-content:flex-start; }}
+  .log-group:nth-child(3) {{ grid-column:auto; }}
+  .log-fields,.log-group:nth-child(3) .log-fields {{ grid-template-columns:repeat(auto-fit,minmax(130px,1fr)); }}
+  .log-details {{ grid-template-columns:1fr; }}
 }}
 </style></head>
 <body><header><h1>Devin's Out Caller</h1><form action="./" method="get" class="inline"><label>{field_label("Campaign", "Select which campaign's contacts, settings, and logs are shown.")}<select name="campaign_id">{campaign_options}</select></label><input type="hidden" name="tab" value="{escape(tab)}"><button class="secondary" type="submit">Open</button></form></header>
