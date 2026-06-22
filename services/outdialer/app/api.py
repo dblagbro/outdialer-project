@@ -488,6 +488,21 @@ def normalize_ai_decision(raw: dict[str, object], fallback_text: str = "") -> di
     if action not in {"legacy", "leave_voicemail", "speak_and_listen", "mark_rsvp", "complete", "hangup"}:
         action = "speak_and_listen" if (decision.get("text") or fallback_text) else "complete"
     decision["action"] = action
+    if decision.get("digit") is not None:
+        raw_digit = decision.get("digit")
+        if isinstance(raw_digit, float) and raw_digit.is_integer():
+            raw_digit = int(raw_digit)
+        decision["digit"] = str(raw_digit).strip()
+    if not decision.get("digit"):
+        status_digit = {
+            "attending": "1",
+            "attending_needs_headcount": "1",
+            "not_attending": "2",
+            "unsure": "3",
+            "callback_requested": "9",
+        }.get(str(decision.get("status") or "").strip().lower())
+        if status_digit:
+            decision["digit"] = status_digit
     if fallback_text and not decision.get("text"):
         decision["text"] = fallback_text
     if decision.get("digit") not in {"1", "2", "3", "9", "", None}:
@@ -624,18 +639,34 @@ def call_flowise(campaign: Campaign, contact: Contact | None, payload: dict[str,
         return None, f"Flowise request failed: {exc}"
 
     parsed = extract_json_object(raw)
+    if parsed and "action" not in parsed:
+        data = parsed
+        parsed = None
+        for key in ["text", "answer", "result", "output"]:
+            inner = data.get(key)
+            if isinstance(inner, dict):
+                parsed = inner
+            else:
+                parsed = extract_json_object(str(inner or ""))
+            if parsed:
+                break
     if not parsed:
         try:
             data = json.loads(raw)
         except json.JSONDecodeError:
             return None, f"Flowise returned non-JSON: {raw[:300]}"
         if isinstance(data, dict):
-            for key in ["text", "answer", "result", "output"]:
-                parsed = extract_json_object(str(data.get(key) or ""))
-                if parsed:
-                    break
-            if not parsed and "action" in data:
+            if "action" in data:
                 parsed = data
+            else:
+                for key in ["text", "answer", "result", "output"]:
+                    inner = data.get(key)
+                    if isinstance(inner, dict):
+                        parsed = inner
+                    else:
+                        parsed = extract_json_object(str(inner or ""))
+                    if parsed:
+                        break
     if not parsed:
         return None, f"Flowise response did not include an action JSON object: {raw[:300]}"
     decision = normalize_ai_decision(parsed)
@@ -1072,71 +1103,18 @@ def render_admin(
             </tr>""")
     rows_html = "\n".join(contact_rows) or '<tr><td colspan="13" class="empty">No contacts imported yet.</td></tr>'
 
-    def log_field(label: str, value: object, css: str = "") -> str:
-        text = str(value or "").strip()
-        return f'<div class="log-field {css}"><span>{escape(label)}</span><strong>{escape(text or "-")}</strong></div>'
-
-    def log_detail(label: str, value: object, open_detail: bool = False) -> str:
-        text = str(value or "").strip()
-        if not text:
-            return ""
-        open_attr = " open" if open_detail else ""
-        return f'<details class="log-detail"{open_attr}><summary>{escape(label)}</summary><pre>{escape(text)}</pre></details>'
-
-    log_cards = []
+    log_rows = []
     for item in logs:
-        status_text = str(item["status"] or "")
-        response_text = str(item["sip_last_response"] or "")
-        recording_html = recording_link(item["voice_recording"]) or "-"
-        counts = [
-            log_field("Total", item["party_size"], "num"),
-            log_field("Kids", item["party_kids"] if item["party_kids"] is not None else "", "num"),
-            log_field("Friends", item["party_friends"] if item["party_friends"] is not None else "", "num"),
-            log_field("Family", item["party_family"] if item["party_family"] is not None else "", "num"),
-        ]
-        log_cards.append(f"""
-          <article class="log-card">
-            <div class="log-card-head">
-              <div>
-                <span class="eyebrow">Created {escape(format_dt(item['created_at']))}</span>
-                <h3>{escape(str(item['name'] or 'Unknown contact'))}</h3>
-              </div>
-              <div class="log-badges">
-                <span class="status-pill">{escape(status_text or 'unknown')}</span>
-                <span class="sip-pill">{escape(response_text or 'No SIP response')}</span>
-              </div>
-            </div>
-            <div class="log-grid primary">
-              {log_field("Completed", format_dt(item['completed_at']))}
-              {log_field("Contact Phone", item['phone'])}
-              {log_field("Dial Input", item['dial_input'])}
-              {log_field("Format", dial_normalization_label(str(item['dial_normalization'] or '')))}
-              {log_field("Dialed", item['dialed_number'])}
-              {log_field("Caller ID", item['caller_id_number'])}
-              {log_field("Digit", item['digit'], "num")}
-              {log_field("AMD", item['amd_status'])}
-            </div>
-            <div class="log-grid counts">
-              {''.join(counts)}
-              <div class="log-field"><span>Recording</span><strong>{recording_html}</strong></div>
-            </div>
-            <details class="log-detail sip-detail" open>
-              <summary>SIP Routing</summary>
-              <div class="log-grid">
-                {log_field("SIP To", item['sip_to'])}
-                {log_field("SIP From", item['sip_from'])}
-                {log_field("SIP Route", item['sip_route'])}
-              </div>
-            </details>
-            <div class="log-detail-grid">
-              {log_detail("Message", item['message'], True)}
-              {log_detail("Transcript", item['transcript'])}
-              {log_detail("Party Details", item['party_details'])}
-              {log_detail("AI Decision", item['ai_decision'])}
-              {log_detail("AI Trace", item['ai_trace'])}
-            </div>
-          </article>""")
-    logs_html = "\n".join(log_cards) or '<div class="empty log-empty">No call attempts logged yet.</div>'
+        log_rows.append(f"""
+            <tr><td>{escape(format_dt(item['created_at']))}</td><td>{escape(format_dt(item['completed_at']))}</td>
+            <td>{escape(str(item['name'] or ""))}</td><td>{escape(str(item['phone'] or ""))}</td>
+            <td>{escape(str(item['dial_input'] or ""))}</td><td>{escape(dial_normalization_label(str(item['dial_normalization'] or "")))}</td><td>{escape(str(item['dialed_number'] or ""))}</td>
+            <td>{escape(str(item['caller_id_number'] or ""))}</td><td>{escape(str(item['sip_to'] or ""))}</td><td>{escape(str(item['sip_from'] or ""))}</td>
+            <td>{escape(str(item['sip_route'] or ""))}</td><td>{escape(str(item['sip_last_response'] or ""))}</td><td>{escape(str(item['status'] or ""))}</td><td class="num">{escape(str(item['digit'] or ""))}</td>
+            <td class="num">{escape(str(item['party_size'] or ""))}</td><td class="num">{escape(str(item['party_kids'] if item['party_kids'] is not None else ""))}</td><td class="num">{escape(str(item['party_friends'] if item['party_friends'] is not None else ""))}</td><td class="num">{escape(str(item['party_family'] if item['party_family'] is not None else ""))}</td><td>{escape(str(item['party_details'] or ""))}</td>
+            <td>{escape(str(item['amd_status'] or ""))}</td><td>{escape(str(item['transcript'] or ""))}</td><td>{escape(str(item['ai_decision'] or ""))}</td><td>{escape(str(item['ai_trace'] or ""))}</td><td>{recording_link(item['voice_recording'])}</td>
+            <td>{escape(str(item['message'] or ""))}</td></tr>""")
+    logs_html = "\n".join(log_rows) or '<tr><td colspan="25" class="empty">No call attempts logged yet.</td></tr>'
 
     event_rows = []
     for event in events:
@@ -1293,7 +1271,7 @@ def render_admin(
           <span class="table-timestamp">Last refreshed {escape(refreshed_at)}</span>
         </form>
       </section>
-      <section class="log-list">{logs_html}</section>
+      <section><div class="scroll log-table"><table><thead><tr><th>Created</th><th>Completed</th><th>Name</th><th>Contact Phone</th><th>Dial Input</th><th>Format</th><th>Dialed</th><th>Caller ID</th><th>SIP To</th><th>SIP From</th><th>SIP Route</th><th>Last SIP Response</th><th>Status</th><th>Digit</th><th>Total</th><th>Kids</th><th>Friends</th><th>Family</th><th>Party Details</th><th>AMD</th><th>Transcript</th><th>AI Decision</th><th>AI Trace</th><th>Recording</th><th>Message</th></tr></thead><tbody>{logs_html}</tbody></table></div></section>
     """
     voice_section = f"""
       <section class="panel">
@@ -1326,7 +1304,7 @@ def render_admin(
             <label>{field_label("Observe Milliseconds", "Set 0 for fast-start speech immediately after answer. Higher values record/transcribe before the first prompt for voicemail detection.")}<input name="ai_observe_ms" value="{campaign.ai_observe_ms}"></label>
             <label>{field_label("Listen Milliseconds", "Speech listen window after each AI prompt.")}<input name="ai_listen_ms" value="{campaign.ai_listen_ms}"></label>
             <label>{field_label("Max Turns", "Maximum AI listen/speak cycles before no-response handling.")}<input name="ai_max_turns" value="{campaign.ai_max_turns}"></label>
-            <label class="wide">{field_label("Flowise URL", "Prediction endpoint, usually http://flowise:3000/api/v1/prediction.")}<input name="flowise_api_url" value="{escape(campaign.flowise_api_url or '')}"></label>
+            <label class="wide">{field_label("Flowise URL", "Prediction endpoint, usually http://gaid:3000/api/v1/prediction.")}<input name="flowise_api_url" value="{escape(campaign.flowise_api_url or '')}"></label>
             <label>{field_label("Flowise Chatflow ID", "Flowise chatflow ID used for call-brain decisions.")}<input name="flowise_chatflow_id" value="{escape(campaign.flowise_chatflow_id or '')}"></label>
             <label>{field_label("Flowise API Key", "Optional bearer token for the Flowise prediction API.")}<input type="password" name="flowise_api_key" value="{escape(campaign.flowise_api_key or '')}"></label>
             <label>{field_label("Flowise Username", "Optional HTTP basic username if Flowise basic auth is enabled.")}<input name="flowise_username" value="{escape(campaign.flowise_username or '')}"></label>
@@ -1517,26 +1495,6 @@ td.num {{ text-align:right; font-variant-numeric:tabular-nums; }}
 .table-toolbar form {{ margin-top:8px; }}
 .table-timestamp {{ color:#687386; font-size:13px; padding:8px 0; }}
 .refresh-status {{ color:#4f5b68; font-size:13px; padding:8px 0; font-variant-numeric:tabular-nums; }}
-.log-list {{ display:grid; gap:12px; }}
-.log-card {{ background:white; border:1px solid #d7dde4; border-radius:6px; padding:14px; display:grid; gap:12px; }}
-.log-card-head {{ display:flex; justify-content:space-between; gap:12px; align-items:start; flex-wrap:wrap; }}
-.log-card h3 {{ margin:3px 0 0; font-size:18px; letter-spacing:0; }}
-.log-badges {{ display:flex; gap:7px; flex-wrap:wrap; justify-content:flex-end; }}
-.log-badges .status-pill,.sip-pill {{ background:#eef2f6; border:1px solid #c6d0db; color:#263238; border-radius:999px; padding:4px 9px; font-size:12px; font-weight:bold; }}
-.sip-pill {{ background:#f4f7fb; }}
-.log-grid {{ display:grid; grid-template-columns:repeat(auto-fit,minmax(190px,1fr)); gap:10px; min-width:0; }}
-.log-grid.counts {{ grid-template-columns:repeat(auto-fit,minmax(110px,1fr)); }}
-.log-field {{ min-width:0; display:grid; gap:3px; align-content:start; }}
-.log-field span {{ color:#5e6978; font-size:11px; text-transform:uppercase; font-weight:bold; }}
-.log-field strong {{ min-width:0; color:#1b1f24; font-size:13px; font-weight:600; overflow-wrap:anywhere; word-break:break-word; }}
-.log-field.num strong {{ font-variant-numeric:tabular-nums; text-align:right; }}
-.log-detail-grid {{ display:grid; grid-template-columns:repeat(auto-fit,minmax(260px,1fr)); gap:10px; }}
-.log-detail {{ min-width:0; border:1px solid #e2e7ee; border-radius:5px; background:#fbfcfd; }}
-.log-detail summary {{ cursor:pointer; padding:8px 10px; color:#4f5b68; font-size:12px; text-transform:uppercase; font-weight:bold; }}
-.log-detail pre {{ margin:0; padding:0 10px 10px; max-height:220px; overflow:auto; white-space:pre-wrap; overflow-wrap:anywhere; word-break:break-word; font-family:Consolas,monospace; font-size:12px; line-height:1.35; }}
-.sip-detail {{ background:white; }}
-.sip-detail .log-grid {{ padding:0 10px 10px; }}
-.log-empty {{ background:white; border:1px solid #d7dde4; border-radius:6px; }}
 label {{ display:grid; gap:5px; color:#4f5b68; font-size:13px; }}
 label span {{ display:flex; gap:5px; align-items:center; }}
 code {{ white-space:pre-wrap; font-family:Consolas,monospace; font-size:12px; }}
@@ -1555,8 +1513,6 @@ code {{ white-space:pre-wrap; font-family:Consolas,monospace; font-size:12px; }}
   .contact-table td.actions::before {{ flex:0 0 100%; }}
   .contact-table td input,.contact-table td select {{ min-width:0; width:100%; }}
   .contact-table .small-num {{ width:100%; min-width:0; }}
-  .log-grid {{ grid-template-columns:repeat(auto-fit,minmax(160px,1fr)); }}
-  .log-detail-grid {{ grid-template-columns:1fr; }}
 }}
 @media (max-width:900px) {{
   main {{ padding:18px 12px; }}
@@ -1580,11 +1536,6 @@ code {{ white-space:pre-wrap; font-family:Consolas,monospace; font-size:12px; }}
   .contact-table tr {{ grid-template-columns:repeat(auto-fit,minmax(220px,1fr)); }}
   .contact-table td {{ grid-template-columns:1fr; }}
   .contact-table td.actions {{ grid-template-columns:1fr; }}
-  .log-card {{ padding:12px; }}
-  .log-card-head {{ display:grid; }}
-  .log-badges {{ justify-content:flex-start; }}
-  .log-grid,.log-grid.counts {{ grid-template-columns:1fr 1fr; }}
-  .sip-detail .log-grid,.log-detail-grid {{ grid-template-columns:1fr; }}
 }}
 </style></head>
 <body><header><h1>Devin's Out Caller</h1><form action="./" method="get" class="inline"><label>{field_label("Campaign", "Select which campaign's contacts, settings, and logs are shown.")}<select name="campaign_id">{campaign_options}</select></label><input type="hidden" name="tab" value="{escape(tab)}"><button class="secondary" type="submit">Open</button></form></header>
@@ -1883,11 +1834,52 @@ def agi_decision(payload: dict[str, object], db: Session = Depends(get_db)) -> d
     action = str(decision.get("action") or "")
     status = str(decision.get("status") or "")
     digit = str(decision.get("digit") or "")
+    transcript = str(payload.get("transcript") or "")
+    if (
+        stage == "answer_observed"
+        and not transcript.strip()
+        and str(payload.get("answer_class") or "") != "machine"
+        and action == "speak_and_listen"
+    ):
+        decision = normalize_ai_decision(
+            {
+                "action": "speak_and_listen",
+                "text": render_for_contact(campaign, contact, script_value(campaign, "intro_script")),
+                "status": "in_conversation",
+                "listen_ms": campaign.ai_listen_ms or 7000,
+                "next_stage": "rsvp_response",
+                "collect_digits": 1,
+                "hangup_after": False,
+                "reason": "guarded initial prompt before headcount",
+                "source": str(decision.get("source") or "flowise_guard"),
+            }
+        )
+        action = str(decision.get("action") or "")
+        status = str(decision.get("status") or "")
+        digit = str(decision.get("digit") or "")
+    party_info = parse_party_info(transcript, str(payload.get("digit") or "") if stage == "attending_followup" else "")
+    if decision.get("party_size"):
+        party_info.update(party_values_for_decision(decision))
+    classified_digit = classify_ai_rsvp(transcript, digit)
+    if (
+        action == "speak_and_listen"
+        and party_info.get("party_size")
+        and (stage == "attending_followup" or classified_digit == "1" or status in {"attending", "collecting_headcount"})
+    ):
+        decision = attending_done_decision(
+            campaign,
+            contact,
+            party_info,
+            str(decision.get("reason") or "guarded parsed headcount from Flowise response"),
+            str(decision.get("source") or "flowise_guard"),
+        )
+        action = str(decision.get("action") or "")
+        status = str(decision.get("status") or "")
+        digit = str(decision.get("digit") or "")
     if action == "speak_and_listen" and stage == "attending_followup":
         decision["next_stage"] = "attending_followup"
         decision["collect_digits"] = 2
     if action == "mark_rsvp" and (digit == "1" or status == "attending"):
-        party_info = parse_party_info(str(payload.get("transcript") or ""), str(payload.get("digit") or "") if stage == "attending_followup" else "")
         if decision.get("party_size"):
             party_info.update(party_values_for_decision(decision))
             decision = attending_done_decision(campaign, contact, party_info, str(decision.get("reason") or "attending headcount accepted"), str(decision.get("source") or "local"))
