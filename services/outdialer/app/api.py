@@ -1072,18 +1072,71 @@ def render_admin(
             </tr>""")
     rows_html = "\n".join(contact_rows) or '<tr><td colspan="13" class="empty">No contacts imported yet.</td></tr>'
 
-    log_rows = []
+    def log_field(label: str, value: object, css: str = "") -> str:
+        text = str(value or "").strip()
+        return f'<div class="log-field {css}"><span>{escape(label)}</span><strong>{escape(text or "-")}</strong></div>'
+
+    def log_detail(label: str, value: object, open_detail: bool = False) -> str:
+        text = str(value or "").strip()
+        if not text:
+            return ""
+        open_attr = " open" if open_detail else ""
+        return f'<details class="log-detail"{open_attr}><summary>{escape(label)}</summary><pre>{escape(text)}</pre></details>'
+
+    log_cards = []
     for item in logs:
-        log_rows.append(f"""
-            <tr><td>{escape(format_dt(item['created_at']))}</td><td>{escape(format_dt(item['completed_at']))}</td>
-            <td>{escape(str(item['name'] or ""))}</td><td>{escape(str(item['phone'] or ""))}</td>
-            <td>{escape(str(item['dial_input'] or ""))}</td><td>{escape(dial_normalization_label(str(item['dial_normalization'] or "")))}</td><td>{escape(str(item['dialed_number'] or ""))}</td>
-            <td>{escape(str(item['caller_id_number'] or ""))}</td><td>{escape(str(item['sip_to'] or ""))}</td><td>{escape(str(item['sip_from'] or ""))}</td>
-            <td>{escape(str(item['sip_route'] or ""))}</td><td>{escape(str(item['sip_last_response'] or ""))}</td><td>{escape(str(item['status'] or ""))}</td><td class="num">{escape(str(item['digit'] or ""))}</td>
-            <td class="num">{escape(str(item['party_size'] or ""))}</td><td class="num">{escape(str(item['party_kids'] if item['party_kids'] is not None else ""))}</td><td class="num">{escape(str(item['party_friends'] if item['party_friends'] is not None else ""))}</td><td class="num">{escape(str(item['party_family'] if item['party_family'] is not None else ""))}</td><td>{escape(str(item['party_details'] or ""))}</td>
-            <td>{escape(str(item['amd_status'] or ""))}</td><td>{escape(str(item['transcript'] or ""))}</td><td>{escape(str(item['ai_decision'] or ""))}</td><td>{escape(str(item['ai_trace'] or ""))}</td><td>{recording_link(item['voice_recording'])}</td>
-            <td>{escape(str(item['message'] or ""))}</td></tr>""")
-    logs_html = "\n".join(log_rows) or '<tr><td colspan="25" class="empty">No call attempts logged yet.</td></tr>'
+        status_text = str(item["status"] or "")
+        response_text = str(item["sip_last_response"] or "")
+        recording_html = recording_link(item["voice_recording"]) or "-"
+        counts = [
+            log_field("Total", item["party_size"], "num"),
+            log_field("Kids", item["party_kids"] if item["party_kids"] is not None else "", "num"),
+            log_field("Friends", item["party_friends"] if item["party_friends"] is not None else "", "num"),
+            log_field("Family", item["party_family"] if item["party_family"] is not None else "", "num"),
+        ]
+        log_cards.append(f"""
+          <article class="log-card">
+            <div class="log-card-head">
+              <div>
+                <span class="eyebrow">Created {escape(format_dt(item['created_at']))}</span>
+                <h3>{escape(str(item['name'] or 'Unknown contact'))}</h3>
+              </div>
+              <div class="log-badges">
+                <span class="status-pill">{escape(status_text or 'unknown')}</span>
+                <span class="sip-pill">{escape(response_text or 'No SIP response')}</span>
+              </div>
+            </div>
+            <div class="log-grid primary">
+              {log_field("Completed", format_dt(item['completed_at']))}
+              {log_field("Contact Phone", item['phone'])}
+              {log_field("Dial Input", item['dial_input'])}
+              {log_field("Format", dial_normalization_label(str(item['dial_normalization'] or '')))}
+              {log_field("Dialed", item['dialed_number'])}
+              {log_field("Caller ID", item['caller_id_number'])}
+              {log_field("Digit", item['digit'], "num")}
+              {log_field("AMD", item['amd_status'])}
+            </div>
+            <div class="log-grid counts">
+              {''.join(counts)}
+              <div class="log-field"><span>Recording</span><strong>{recording_html}</strong></div>
+            </div>
+            <details class="log-detail sip-detail" open>
+              <summary>SIP Routing</summary>
+              <div class="log-grid">
+                {log_field("SIP To", item['sip_to'])}
+                {log_field("SIP From", item['sip_from'])}
+                {log_field("SIP Route", item['sip_route'])}
+              </div>
+            </details>
+            <div class="log-detail-grid">
+              {log_detail("Message", item['message'], True)}
+              {log_detail("Transcript", item['transcript'])}
+              {log_detail("Party Details", item['party_details'])}
+              {log_detail("AI Decision", item['ai_decision'])}
+              {log_detail("AI Trace", item['ai_trace'])}
+            </div>
+          </article>""")
+    logs_html = "\n".join(log_cards) or '<div class="empty log-empty">No call attempts logged yet.</div>'
 
     event_rows = []
     for event in events:
@@ -1240,7 +1293,7 @@ def render_admin(
           <span class="table-timestamp">Last refreshed {escape(refreshed_at)}</span>
         </form>
       </section>
-      <section><div class="scroll log-table"><table><thead><tr><th>Created</th><th>Completed</th><th>Name</th><th>Contact Phone</th><th>Dial Input</th><th>Format</th><th>Dialed</th><th>Caller ID</th><th>SIP To</th><th>SIP From</th><th>SIP Route</th><th>Last SIP Response</th><th>Status</th><th>Digit</th><th>Total</th><th>Kids</th><th>Friends</th><th>Family</th><th>Party Details</th><th>AMD</th><th>Transcript</th><th>AI Decision</th><th>AI Trace</th><th>Recording</th><th>Message</th></tr></thead><tbody>{logs_html}</tbody></table></div></section>
+      <section class="log-list">{logs_html}</section>
     """
     voice_section = f"""
       <section class="panel">
@@ -1464,6 +1517,26 @@ td.num {{ text-align:right; font-variant-numeric:tabular-nums; }}
 .table-toolbar form {{ margin-top:8px; }}
 .table-timestamp {{ color:#687386; font-size:13px; padding:8px 0; }}
 .refresh-status {{ color:#4f5b68; font-size:13px; padding:8px 0; font-variant-numeric:tabular-nums; }}
+.log-list {{ display:grid; gap:12px; }}
+.log-card {{ background:white; border:1px solid #d7dde4; border-radius:6px; padding:14px; display:grid; gap:12px; }}
+.log-card-head {{ display:flex; justify-content:space-between; gap:12px; align-items:start; flex-wrap:wrap; }}
+.log-card h3 {{ margin:3px 0 0; font-size:18px; letter-spacing:0; }}
+.log-badges {{ display:flex; gap:7px; flex-wrap:wrap; justify-content:flex-end; }}
+.log-badges .status-pill,.sip-pill {{ background:#eef2f6; border:1px solid #c6d0db; color:#263238; border-radius:999px; padding:4px 9px; font-size:12px; font-weight:bold; }}
+.sip-pill {{ background:#f4f7fb; }}
+.log-grid {{ display:grid; grid-template-columns:repeat(auto-fit,minmax(190px,1fr)); gap:10px; min-width:0; }}
+.log-grid.counts {{ grid-template-columns:repeat(auto-fit,minmax(110px,1fr)); }}
+.log-field {{ min-width:0; display:grid; gap:3px; align-content:start; }}
+.log-field span {{ color:#5e6978; font-size:11px; text-transform:uppercase; font-weight:bold; }}
+.log-field strong {{ min-width:0; color:#1b1f24; font-size:13px; font-weight:600; overflow-wrap:anywhere; word-break:break-word; }}
+.log-field.num strong {{ font-variant-numeric:tabular-nums; text-align:right; }}
+.log-detail-grid {{ display:grid; grid-template-columns:repeat(auto-fit,minmax(260px,1fr)); gap:10px; }}
+.log-detail {{ min-width:0; border:1px solid #e2e7ee; border-radius:5px; background:#fbfcfd; }}
+.log-detail summary {{ cursor:pointer; padding:8px 10px; color:#4f5b68; font-size:12px; text-transform:uppercase; font-weight:bold; }}
+.log-detail pre {{ margin:0; padding:0 10px 10px; max-height:220px; overflow:auto; white-space:pre-wrap; overflow-wrap:anywhere; word-break:break-word; font-family:Consolas,monospace; font-size:12px; line-height:1.35; }}
+.sip-detail {{ background:white; }}
+.sip-detail .log-grid {{ padding:0 10px 10px; }}
+.log-empty {{ background:white; border:1px solid #d7dde4; border-radius:6px; }}
 label {{ display:grid; gap:5px; color:#4f5b68; font-size:13px; }}
 label span {{ display:flex; gap:5px; align-items:center; }}
 code {{ white-space:pre-wrap; font-family:Consolas,monospace; font-size:12px; }}
@@ -1482,6 +1555,8 @@ code {{ white-space:pre-wrap; font-family:Consolas,monospace; font-size:12px; }}
   .contact-table td.actions::before {{ flex:0 0 100%; }}
   .contact-table td input,.contact-table td select {{ min-width:0; width:100%; }}
   .contact-table .small-num {{ width:100%; min-width:0; }}
+  .log-grid {{ grid-template-columns:repeat(auto-fit,minmax(160px,1fr)); }}
+  .log-detail-grid {{ grid-template-columns:1fr; }}
 }}
 @media (max-width:900px) {{
   main {{ padding:18px 12px; }}
@@ -1505,6 +1580,11 @@ code {{ white-space:pre-wrap; font-family:Consolas,monospace; font-size:12px; }}
   .contact-table tr {{ grid-template-columns:repeat(auto-fit,minmax(220px,1fr)); }}
   .contact-table td {{ grid-template-columns:1fr; }}
   .contact-table td.actions {{ grid-template-columns:1fr; }}
+  .log-card {{ padding:12px; }}
+  .log-card-head {{ display:grid; }}
+  .log-badges {{ justify-content:flex-start; }}
+  .log-grid,.log-grid.counts {{ grid-template-columns:1fr 1fr; }}
+  .sip-detail .log-grid,.log-detail-grid {{ grid-template-columns:1fr; }}
 }}
 </style></head>
 <body><header><h1>Devin's Out Caller</h1><form action="./" method="get" class="inline"><label>{field_label("Campaign", "Select which campaign's contacts, settings, and logs are shown.")}<select name="campaign_id">{campaign_options}</select></label><input type="hidden" name="tab" value="{escape(tab)}"><button class="secondary" type="submit">Open</button></form></header>
