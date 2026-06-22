@@ -74,6 +74,13 @@ def clean_dial_prefix(prefix: str) -> str:
     return re.sub(r"[^0-9*#]", "", prefix or "")
 
 
+def env_bool(name: str, default: bool = False) -> bool:
+    value = os.getenv(name)
+    if value is None:
+        return default
+    return value.strip().lower() in {"1", "true", "yes", "on"}
+
+
 def safe_var(value: str | None) -> str:
     return (value or "").replace("\n", " ").replace("\r", " ").replace(";", ",")
 
@@ -196,8 +203,10 @@ def call_metadata(campaign: Campaign, contact: Contact) -> dict[str, str]:
     avaya_host = os.getenv("AVAYA_SIP_HOST", "")
     request_uri_host = os.getenv("AVAYA_SIP_CONTACT_HOST", "") or avaya_host
     outbound_proxy = os.getenv("AVAYA_OUTBOUND_PROXY", "")
-    sip_to = f"sip:{phone}@{request_uri_host}"
-    sip_channel = f"PJSIP/avaya/{sip_to}:5060"
+    user_phone_param = ";user=phone" if env_bool("AVAYA_SIP_USER_PHONE", True) else ""
+    sip_to = f"sip:{phone}@{request_uri_host}{user_phone_param}"
+    sip_route_uri = f"sip:{phone}@{request_uri_host}:5060{user_phone_param}"
+    sip_channel = f"PJSIP/avaya/{sip_route_uri}"
     identity_number = caller_id_number or os.getenv("AVAYA_SIP_USERNAME", "")
     sip_from_domain = from_domain or avaya_host
     sip_from = f"sip:{identity_number}@{sip_from_domain}"
@@ -213,7 +222,7 @@ def call_metadata(campaign: Campaign, contact: Contact) -> dict[str, str]:
         "sip_channel": sip_channel,
         "sip_to": sip_to,
         "sip_from": sip_from,
-        "sip_route": outbound_proxy or f"sip:{phone}@{request_uri_host}:5060",
+        "sip_route": outbound_proxy or sip_route_uri,
         "sip_target": request_uri_host,
     }
 

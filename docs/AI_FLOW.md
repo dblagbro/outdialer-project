@@ -94,17 +94,20 @@ The AI Flow tab controls:
 
 ## TTS/STT Behavior
 
-Asterisk AGI tries the speech bridge first for TTS. If the bridge is unavailable or slow, it falls back to local `espeak-ng`.
+Asterisk AGI tries Deepgram first for TTS and STT when `DEEPGRAM_API_KEY` is set. If Deepgram is unavailable, it falls back to the speech bridge and then local `espeak-ng` for TTS.
 
 Useful settings:
 
 ```text
+DEEPGRAM_API_KEY=
+DEEPGRAM_TTS_MODEL=aura-2-apollo-en
+DEEPGRAM_STT_MODEL=nova-3
 WHISPER_BRIDGE_URL=http://whisper-bridge:9000
 WHISPER_BRIDGE_TOKEN=change-me
 TTS_TIMEOUT_SECONDS=2
 ```
 
-Prompt files are cached by text hash under:
+Prompt files are cached by provider/model/text hash under:
 
 ```text
 /var/lib/asterisk/sounds/generated

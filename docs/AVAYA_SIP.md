@@ -43,19 +43,19 @@ Avaya must route calls from the outdialer host by IP/SIP entity/link/routing pol
 The worker builds:
 
 ```text
-PJSIP/avaya/sip:DIALED_NUMBER@AVAYA_SIP_CONTACT_HOST:5060
+PJSIP/avaya/sip:DIALED_NUMBER@AVAYA_SIP_CONTACT_HOST:5060;user=phone
 ```
 
 This leads to SIP like:
 
 ```text
-INVITE sip:DIALED_NUMBER@AVAYA_SIP_CONTACT_HOST:5060 SIP/2.0
-To: <sip:DIALED_NUMBER@AVAYA_SIP_CONTACT_HOST>
+INVITE sip:DIALED_NUMBER@AVAYA_SIP_CONTACT_HOST:5060;user=phone SIP/2.0
+To: <sip:DIALED_NUMBER@AVAYA_SIP_CONTACT_HOST;user=phone>
 From: "CALLER_ID_NAME" <sip:CALLER_ID_NUMBER@AVAYA_FROM_DOMAIN>
 P-Asserted-Identity: <sip:CALLER_ID_NUMBER@AVAYA_FROM_DOMAIN>
 ```
 
-The Request-URI host should be a SIP listener, normally Session Manager/SM100 or another Avaya SIP entity. It should not be a domain controller or a server that does not run SIP.
+The Request-URI host should be a SIP listener, normally Session Manager/SM100 or another Avaya SIP entity. It should not be a domain controller or a server that does not run SIP. `AVAYA_SIP_USER_PHONE=true` appends `;user=phone`, which helps Avaya treat the URI user as a telephone number instead of an internal SIP name.
 
 ## Dial Prefix And Long Distance
 
@@ -135,6 +135,7 @@ Fix:
 
 - Set `AVAYA_SIP_HOST` to the Avaya SIP listener used for identify/registration.
 - Set `AVAYA_SIP_CONTACT_HOST` to the host that should appear in Request-URI.
+- Keep `AVAYA_SIP_USER_PHONE=true` when Avaya only routes the call correctly with telephone-number SIP URI handling.
 - Do not point SIP to domain controllers or non-SIP infrastructure.
 
 ### No Audio

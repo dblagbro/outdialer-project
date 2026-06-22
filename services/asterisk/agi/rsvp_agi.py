@@ -61,8 +61,30 @@ def get_variable(name: str, default: str = "") -> str:
     return response.split(marker, 1)[1].rsplit(")", 1)[0]
 
 
+def deepgram_api_key() -> str:
+    return os.getenv("DEEPGRAM_API_KEY", "").strip()
+
+
+def env_bool(name: str, default: bool = True) -> bool:
+    value = os.getenv(name)
+    if value is None:
+        return default
+    return value.strip().lower() in {"1", "true", "yes", "on"}
+
+
+def prompt_cache_salt() -> str:
+    if deepgram_api_key() and env_bool("DEEPGRAM_TTS_ENABLED", True):
+        model = os.getenv("DEEPGRAM_TTS_MODEL", "aura-2-apollo-en").strip()
+        sample_rate = os.getenv("DEEPGRAM_TTS_SAMPLE_RATE", "8000").strip()
+        return f"deepgram:{model}:{sample_rate}"
+    bridge_url = os.getenv("WHISPER_BRIDGE_URL", "").strip()
+    if bridge_url:
+        return f"bridge:{bridge_url}"
+    return "espeak-ng:en-us:145"
+
+
 def make_prompt(prompt_id: str, text: str) -> str:
-    digest = hashlib.sha1(text.encode("utf-8")).hexdigest()[:12]
+    digest = hashlib.sha1(f"{prompt_cache_salt()}\n{text}".encode("utf-8")).hexdigest()[:12]
     prompt_name = f"{prompt_id}-{digest}"
     out_base = f"/var/lib/asterisk/sounds/generated/{prompt_name}"
     out_wav = f"{out_base}.wav"
@@ -101,6 +123,8 @@ def env_float(name: str, default: float) -> float:
 
 
 def synthesize_prompt(out_wav: str, text: str) -> bool:
+    if synthesize_with_deepgram(out_wav, text):
+        return True
     base_url = os.getenv("WHISPER_BRIDGE_URL", "").strip().rstrip("/")
     if not base_url:
         return False
@@ -116,6 +140,39 @@ def synthesize_prompt(out_wav: str, text: str) -> bool:
             handle.write(response.content)
         return True
     except Exception:
+        return False
+
+
+def synthesize_with_deepgram(out_wav: str, text: str) -> bool:
+    api_key = deepgram_api_key()
+    if not api_key or not env_bool("DEEPGRAM_TTS_ENABLED", True):
+        return False
+    model = os.getenv("DEEPGRAM_TTS_MODEL", "aura-2-apollo-en").strip() or "aura-2-apollo-en"
+    sample_rate = os.getenv("DEEPGRAM_TTS_SAMPLE_RATE", "8000").strip() or "8000"
+    url = os.getenv("DEEPGRAM_TTS_URL", "https://api.deepgram.com/v1/speak").strip()
+    try:
+        response = requests.post(
+            url,
+            params={
+                "model": model,
+                "encoding": "linear16",
+                "container": "wav",
+                "sample_rate": sample_rate,
+            },
+            json={"text": text},
+            headers={
+                "Authorization": f"Token {api_key}",
+                "Content-Type": "application/json",
+            },
+            timeout=env_float("DEEPGRAM_TTS_TIMEOUT_SECONDS", env_float("TTS_TIMEOUT_SECONDS", 8.0)),
+        )
+        response.raise_for_status()
+        with open(out_wav, "wb") as handle:
+            handle.write(response.content)
+        return True
+    except Exception as exc:
+        sys.stderr.write(f"Deepgram TTS failed; falling back: {exc}\n")
+        sys.stderr.flush()
         return False
 
 
@@ -236,6 +293,9 @@ def classify_transcript(transcript: str) -> str:
 
 
 def maybe_transcribe(recording_path: str) -> str:
+    deepgram_transcript = transcribe_with_deepgram(recording_path)
+    if deepgram_transcript:
+        return deepgram_transcript
     bridge_transcript = transcribe_with_bridge(recording_path)
     if bridge_transcript:
         return bridge_transcript
@@ -254,6 +314,45 @@ def maybe_transcribe(recording_path: str) -> str:
     except Exception:
         return ""
     return completed.stdout.strip()[:1000]
+
+
+def transcribe_with_deepgram(recording_path: str) -> str:
+    api_key = deepgram_api_key()
+    if not api_key or not env_bool("DEEPGRAM_STT_ENABLED", True) or not recording_path or not os.path.exists(recording_path):
+        return ""
+    params = {
+        "model": os.getenv("DEEPGRAM_STT_MODEL", "nova-3").strip() or "nova-3",
+        "smart_format": "true",
+        "punctuate": "true",
+    }
+    language = os.getenv("DEEPGRAM_STT_LANGUAGE", "en-US").strip()
+    if language:
+        params["language"] = language
+    try:
+        with open(recording_path, "rb") as handle:
+            response = requests.post(
+                os.getenv("DEEPGRAM_STT_URL", "https://api.deepgram.com/v1/listen").strip(),
+                params=params,
+                data=handle.read(),
+                headers={
+                    "Authorization": f"Token {api_key}",
+                    "Content-Type": "audio/wav",
+                },
+                timeout=env_float("DEEPGRAM_STT_TIMEOUT_SECONDS", 12.0),
+            )
+        response.raise_for_status()
+        data = response.json()
+        channels = data.get("results", {}).get("channels", [])
+        if not channels:
+            return ""
+        alternatives = channels[0].get("alternatives", [])
+        if not alternatives:
+            return ""
+        return str(alternatives[0].get("transcript") or "").strip()[:1000]
+    except Exception as exc:
+        sys.stderr.write(f"Deepgram STT failed; falling back: {exc}\n")
+        sys.stderr.flush()
+        return ""
 
 
 def transcribe_with_bridge(recording_path: str) -> str:
