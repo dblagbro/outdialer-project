@@ -735,6 +735,18 @@ def parse_log_dt(line: str) -> datetime | None:
         return None
 
 
+def sip_trace_timestamp(value: datetime | None) -> str:
+    return value.astimezone(timezone.utc).strftime("%Y-%m-%d %H:%M:%S UTC") if value else "unknown time"
+
+
+def strip_log_timestamp(line: str) -> str:
+    return re.sub(r"^\[\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}\]\s*", "", line)
+
+
+def format_sip_trace_line(line: str, timestamp: datetime | None) -> str:
+    return f"[{sip_trace_timestamp(timestamp)}] {strip_log_timestamp(line)}"
+
+
 def after_clear_marker(db: Session, line: str) -> bool:
     marker = db.get(Campaign, DEFAULT_CAMPAIGN_ID)
     _ = marker
@@ -756,17 +768,22 @@ def sip_trace_lines(db: Session, limit: str = "100", order: str = "newest", text
     needle = text_filter.lower().strip()
     maxlen = None if limit == "all" else max(int(limit), 1)
     lines = [] if maxlen is None else deque(maxlen=maxlen)
+    current_dt = None
     with path.open("r", encoding="utf-8", errors="replace") as handle:
         for raw in handle:
             line = raw.rstrip()
+            line_dt = parse_log_dt(line)
+            if line_dt:
+                current_dt = line_dt
             if not SIP_LINE_RE.search(line):
                 continue
-            line_dt = parse_log_dt(line)
-            if cleared_at_value and line_dt and line_dt <= cleared_at_value:
+            trace_dt = line_dt or current_dt
+            if cleared_at_value and trace_dt and trace_dt <= cleared_at_value:
                 continue
-            if needle and needle not in line.lower():
+            formatted = format_sip_trace_line(line, trace_dt)
+            if needle and needle not in formatted.lower():
                 continue
-            lines.append(line)
+            lines.append(formatted)
     result = list(lines)
     if order == "newest":
         result.reverse()
