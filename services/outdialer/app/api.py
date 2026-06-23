@@ -1233,7 +1233,7 @@ def render_admin(
               <td class="num"><input form="edit-{escape(contact.id)}" class="small-num" type="number" min="0" max="99" name="party_friends" value="{escape(int_value(contact.party_friends))}" aria-label="Friends count"></td>
               <td class="num"><input form="edit-{escape(contact.id)}" class="small-num" type="number" min="0" max="99" name="party_family" value="{escape(int_value(contact.party_family))}" aria-label="Other family count"></td>
               <td><input form="edit-{escape(contact.id)}" name="party_details" value="{escape(contact.party_details or "")}" aria-label="Party details"></td>
-              <td class="num">{contact.attempts}</td><td class="num">{escape(contact.last_digit or "")}</td><td>{escape(format_dt(contact.next_call_at))}</td>
+              <td class="num">{contact.attempts}</td><td class="num">{escape(contact.last_digit or "")}</td><td class="date-field next-call">{escape(format_dt(contact.next_call_at))}</td>
               <td><input form="edit-{escape(contact.id)}" name="notes" value="{escape(contact.notes or "")}" aria-label="Contact notes"></td>
               <td class="actions"><button form="edit-{escape(contact.id)}" type="submit">Save</button>
                 <form action="contacts/{escape(contact.id)}/reset" method="post"><input type="hidden" name="campaign_id" value="{escape(campaign.id)}"><button type="submit">Reset</button></form>
@@ -1665,6 +1665,7 @@ code {{ white-space:pre-wrap; font-family:Consolas,monospace; font-size:12px; }}
   .contact-table tr,.log-table tr {{ display:grid; grid-template-columns:repeat(auto-fit,minmax(150px,1fr)); gap:10px; background:white; border:1px solid #d7dde4; border-radius:6px; padding:12px; }}
   .log-table tr {{ grid-template-columns:repeat(auto-fit,minmax(180px,1fr)); }}
   .contact-table td,.log-table td {{ border:0; padding:0; display:grid; gap:4px; align-content:start; }}
+  .contact-table td.date-field {{ grid-column:span 2; min-width:260px; }}
   .contact-table td::before,.log-table td::before {{ content:attr(data-label); font-size:11px; color:#5e6978; text-transform:uppercase; font-weight:bold; }}
   .contact-table td.actions {{ grid-column:1 / -1; display:flex; flex-wrap:wrap; gap:8px; align-items:center; }}
   .contact-table td.actions::before {{ flex:0 0 100%; }}
@@ -1697,6 +1698,7 @@ code {{ white-space:pre-wrap; font-family:Consolas,monospace; font-size:12px; }}
   .actions form,.actions button {{ width:100%; }}
   .contact-table tr {{ grid-template-columns:repeat(auto-fit,minmax(220px,1fr)); }}
   .contact-table td {{ grid-template-columns:1fr; }}
+  .contact-table td.date-field {{ grid-column:span 1; min-width:0; }}
   .contact-table td.actions {{ grid-template-columns:1fr; }}
 }}
 @media (max-width:720px) {{
