@@ -598,6 +598,10 @@ def decision_party_fields(decision: dict[str, object]) -> dict[str, str]:
     }
 
 
+def result_recording(full_call_recording: str, clip_recording: str = "") -> str:
+    return full_call_recording or clip_recording
+
+
 def stream_text(prompt_id: str, text: str) -> None:
     if text:
         agi(f"STREAM FILE {quote(make_prompt(prompt_id, text))} \"\"")
@@ -613,6 +617,7 @@ def legacy_flow(
     amd_cause: str,
     greeting_transcript: str = "",
     greeting_recording: str = "",
+    full_call_recording: str = "",
 ) -> None:
     if amd_status == "MACHINE":
         agi("EXEC WaitForSilence 900,1,6")
@@ -626,7 +631,7 @@ def legacy_flow(
             "voicemail detected" + (f"; greeting={greeting_transcript}" if greeting_transcript else ""),
             amd_status,
             amd_cause,
-            greeting_recording,
+            result_recording(full_call_recording, greeting_recording),
             greeting_transcript,
             "voicemail_left",
         )
@@ -687,7 +692,7 @@ def legacy_flow(
         response + (f"; greeting={greeting_transcript}" if greeting_transcript else ""),
         amd_status,
         amd_cause,
-        locals().get("headcount_recording", "") or locals().get("voice_recording", "") or greeting_recording,
+        result_recording(full_call_recording, locals().get("headcount_recording", "") or locals().get("voice_recording", "") or greeting_recording),
         locals().get("headcount_transcript", "") or locals().get("transcript", "") or greeting_transcript,
         status,
         "",
@@ -717,6 +722,7 @@ def run_ai_flow(
     greeting_recording: str,
     listen_ms: int,
     max_turns: int,
+    full_call_recording: str,
 ) -> bool:
     trace: list[dict[str, object]] = []
     last_transcript = greeting_transcript
@@ -757,7 +763,7 @@ def run_ai_flow(
                 f"AI voicemail: {decision.get('reason', '')}; greeting={greeting_transcript}",
                 "MACHINE",
                 amd_cause or "AI_OBSERVE:machine",
-                greeting_recording,
+                result_recording(full_call_recording, greeting_recording),
                 greeting_transcript,
                 "voicemail_left",
                 decision_blob,
@@ -792,7 +798,7 @@ def run_ai_flow(
                 f"AI final: {decision.get('reason', '')}; greeting={greeting_transcript}; response={last_transcript}",
                 amd_status,
                 amd_cause,
-                last_recording,
+                result_recording(full_call_recording, last_recording),
                 last_transcript,
                 status,
                 decision_blob,
@@ -835,7 +841,7 @@ def run_ai_flow(
                 f"AI caller hangup during prompt/listen; greeting={greeting_transcript}; response={last_transcript}",
                 amd_status,
                 amd_cause,
-                last_recording,
+                result_recording(full_call_recording, last_recording),
                 last_transcript,
                 hangup_status,
                 json.dumps(hangup_decision, ensure_ascii=True, separators=(",", ":")),
@@ -869,7 +875,7 @@ def run_ai_flow(
                     f"AI caller hangup during response recording; greeting={greeting_transcript}; response={last_transcript}",
                     amd_status,
                     amd_cause,
-                    last_recording,
+                    result_recording(full_call_recording, last_recording),
                     last_transcript,
                     hangup_status,
                     json.dumps(hangup_decision, ensure_ascii=True, separators=(",", ":")),
@@ -914,7 +920,7 @@ def run_ai_flow(
         f"AI max turns exhausted; greeting={greeting_transcript}; response={last_transcript}",
         amd_status,
         amd_cause,
-        last_recording,
+        result_recording(full_call_recording, last_recording),
         last_transcript,
         fallback_status,
         json.dumps(fallback_decision, ensure_ascii=True, separators=(",", ":")),
@@ -929,6 +935,7 @@ def main() -> None:
     campaign_id = get_variable("CAMPAIGN_ID", "default")
     contact_id = get_variable("CONTACT_ID", env.get("agi_arg_1", ""))
     attempt_id = get_variable("ATTEMPT_ID")
+    full_call_recording = get_variable("FULL_CALL_RECORDING_FILE")
     contact_name = get_variable("CONTACT_NAME", "there")
     callback_number = os.getenv("CALLBACK_NUMBER", "")
     config = fetch_campaign_config(campaign_id)
@@ -975,6 +982,7 @@ def main() -> None:
             greeting_recording,
             int_config(config, "_ai_listen_ms", 7000, 1000, 20000),
             int_config(config, "_ai_max_turns", 3, 1, 8),
+            full_call_recording,
         )
         if handled:
             return
@@ -983,7 +991,7 @@ def main() -> None:
         amd_status = get_variable("AMDSTATUS")
         amd_cause = get_variable("AMDCAUSE")
 
-    legacy_flow(contact_id, attempt_id, scripts, script_vars, recording_dir, amd_status, amd_cause, greeting_transcript, greeting_recording)
+    legacy_flow(contact_id, attempt_id, scripts, script_vars, recording_dir, amd_status, amd_cause, greeting_transcript, greeting_recording, full_call_recording)
 
 
 if __name__ == "__main__":
