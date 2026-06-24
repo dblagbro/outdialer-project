@@ -393,6 +393,8 @@ def parse_party_info(transcript: str, digit: str = "") -> dict[str, object]:
                 rf"\bit\s+will\s+be\s+(?P<num>{NUMBER_PATTERN})\b",
                 rf"\bwe\s+(?:are|will\s+be|'ll\s+be)\s+(?P<num>{NUMBER_PATTERN})\b",
                 rf"\b(?P<num>{NUMBER_PATTERN})\s+(?:of\s+us|people|total|coming|attending)\b",
+                rf"\b(?P<num>{NUMBER_PATTERN})\s+(?:including|incl\.?)\s+(?:me|myself)\b",
+                rf"\b(?P<num>{NUMBER_PATTERN})\s+(?:in\s+all|altogether)\b",
             ],
             text,
             1,
@@ -1995,7 +1997,35 @@ def agi_decision(payload: dict[str, object], db: Session = Depends(get_db)) -> d
     attempt = db.get(CallAttempt, attempt_id) if attempt_id else None
     transcript = str(payload.get("transcript") or "")
 
-    if stage == "attending_followup":
+    if campaign.ai_enabled and stage == "answer_observed" and not transcript.strip() and str(payload.get("answer_class") or "") != "machine":
+        decision = normalize_ai_decision(
+            {
+                "action": "speak_and_listen",
+                "text": render_for_contact(campaign, contact, script_value(campaign, "intro_script")),
+                "status": "in_conversation",
+                "listen_ms": campaign.ai_listen_ms or 7000,
+                "next_stage": "rsvp_response",
+                "collect_digits": 1,
+                "hangup_after": False,
+                "reason": "local fast initial prompt with no observed speech",
+                "source": "local_guard",
+            }
+        )
+        decision["listen_ms"] = clamp_int(decision.get("listen_ms"), campaign.ai_listen_ms or 7000, 1000, 20000)
+        decision["collect_digits"] = clamp_int(decision.get("collect_digits"), 1, 1, 2)
+        decision["max_turns"] = campaign.ai_max_turns or 3
+        decision["observe_ms"] = clamp_int(campaign.ai_observe_ms, 0, 0, 15000)
+        append_ai_trace(db, attempt, payload, decision)
+        add_event(
+            db,
+            "ai_decision",
+            f"AI decision: {decision.get('action')}",
+            campaign_id=campaign.id,
+            details=f"attempt_id={attempt_id} contact_id={contact_id} payload={compact_json(payload)} decision={compact_json(decision)}",
+        )
+        return decision
+
+    if campaign.ai_enabled and stage == "attending_followup":
         party_info = parse_party_info(transcript, str(payload.get("digit") or ""))
         if party_info.get("party_size"):
             decision = attending_done_decision(

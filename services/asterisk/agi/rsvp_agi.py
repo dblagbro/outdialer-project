@@ -848,13 +848,14 @@ def run_ai_flow(
         recording_path = ""
         voice_recording = ""
         if not digit:
+            silence_seconds = int(os.getenv("AI_HEADCOUNT_SILENCE_SECONDS", "3")) if response_stage == "attending_followup" else int(os.getenv("AI_RESPONSE_SILENCE_SECONDS", "2"))
             recording_path, voice_recording, record_response = record_clip_with_response(
                 recording_dir,
                 attempt_id,
                 f"ai-turn-{turn}",
                 listen_timeout,
-                int(os.getenv("AI_RESPONSE_SILENCE_SECONDS", "2")),
-                escape_digits,
+                silence_seconds,
+                "#",
             )
             if agi_hung_up(record_response):
                 hangup_status = "attending_needs_headcount" if response_stage == "attending_followup" else "no_response"
