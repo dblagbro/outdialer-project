@@ -374,12 +374,24 @@ def transcribe_with_bridge(recording_path: str) -> str:
         return ""
 
 
-def record_clip(recording_dir: Path, attempt_id: str, label: str, timeout_ms: int, silence_seconds: int = 1) -> tuple[str, str]:
+def record_clip_with_response(
+    recording_dir: Path,
+    attempt_id: str,
+    label: str,
+    timeout_ms: int,
+    silence_seconds: int = 1,
+    escape_digits: str = "#",
+) -> tuple[str, str, str]:
     safe_attempt_id = "".join(ch if ch.isalnum() or ch in "-_" else "_" for ch in (attempt_id or "inbound"))
     recording_base = recording_dir / f"{safe_attempt_id}-{label}"
-    agi(f"RECORD FILE {quote(str(recording_base))} wav \"#\" {timeout_ms} 0 s={silence_seconds}")
+    response = agi(f"RECORD FILE {quote(str(recording_base))} wav {quote(escape_digits)} {timeout_ms} 0 s={silence_seconds}")
     recording_path = f"{recording_base}.wav"
-    return recording_path, os.path.basename(recording_path) if os.path.exists(recording_path) else ""
+    return recording_path, os.path.basename(recording_path) if os.path.exists(recording_path) else "", response
+
+
+def record_clip(recording_dir: Path, attempt_id: str, label: str, timeout_ms: int, silence_seconds: int = 1) -> tuple[str, str]:
+    recording_path, recording_file, _ = record_clip_with_response(recording_dir, attempt_id, label, timeout_ms, silence_seconds, "#")
+    return recording_path, recording_file
 
 
 def observe_answer(recording_dir: Path, attempt_id: str, timeout_ms: int) -> tuple[str, str, str]:
@@ -436,6 +448,8 @@ def extract_digits(response: str, max_digits: int = 1) -> str:
     if "result=" not in response:
         return ""
     value = response.split("result=", 1)[1].split()[0]
+    if value in {"", "0", "-1"} or value.startswith("-"):
+        return ""
     digits = re.sub(r"\D", "", value)
     return digits[:max(1, min(max_digits, 2))]
 
@@ -443,6 +457,89 @@ def extract_digits(response: str, max_digits: int = 1) -> str:
 def extract_rsvp_digit(response: str) -> str:
     value = extract_digits(response, 1)
     return value if value in {"1", "2", "3", "9"} else ""
+
+
+def extract_agi_digit(response: str) -> str:
+    if "result=" not in response:
+        return ""
+    value = response.split("result=", 1)[1].split()[0]
+    if value in {"", "0", "-1"} or value.startswith("-"):
+        return ""
+    if re.fullmatch(r"\d+", value):
+        parsed = int(value)
+        if 48 <= parsed <= 57 or parsed in {35, 42}:
+            return chr(parsed)
+        if len(value) == 1:
+            return value
+    return value[:1]
+
+
+def valid_stage_digit(stage: str, digit: str) -> bool:
+    if not digit or digit == "#":
+        return False
+    if stage == "attending_followup":
+        return digit.isdigit()
+    return digit in {"1", "2", "3", "9"}
+
+
+def stage_escape_digits(stage: str) -> str:
+    return "0123456789#" if stage == "attending_followup" else "1239#"
+
+
+def collect_more_digits(first_digit: str, max_digits: int, stage: str) -> str:
+    if not valid_stage_digit(stage, first_digit):
+        return ""
+    digits = first_digit
+    if stage != "attending_followup" or max_digits <= 1:
+        return digits
+    interdigit_ms = int(os.getenv("DTMF_INTERDIGIT_MS", "1200"))
+    while len(digits) < max_digits:
+        response = agi(f"WAIT FOR DIGIT {interdigit_ms}")
+        if agi_hung_up(response):
+            return digits
+        next_digit = extract_agi_digit(response)
+        if not valid_stage_digit(stage, next_digit):
+            break
+        digits += next_digit
+    return digits
+
+
+def digit_from_agi_response(response: str, max_digits: int, stage: str) -> str:
+    return collect_more_digits(extract_agi_digit(response), max_digits, stage)
+
+
+def attending_followup_fast_path(scripts: dict[str, str], script_vars: dict[str, str], listen_ms: int) -> dict[str, object]:
+    return {
+        "action": "speak_and_listen",
+        "text": render_script(scripts["attending_followup_script"], script_vars),
+        "status": "collecting_headcount",
+        "listen_ms": listen_ms,
+        "next_stage": "attending_followup",
+        "collect_digits": 2,
+        "hangup_after": False,
+        "reason": "local fast-path after DTMF attending response",
+        "source": "agi_fast_path",
+    }
+
+
+def menu_digit_fast_path(digit: str, scripts: dict[str, str], script_vars: dict[str, str], listen_ms: int) -> dict[str, object]:
+    if digit == "1":
+        return attending_followup_fast_path(scripts, script_vars, listen_ms)
+    script_key = {
+        "2": "thanks_not_attending_script",
+        "3": "thanks_unsure_script",
+        "9": "thanks_callback_script",
+    }.get(digit, "no_response_script")
+    status = {"2": "not_attending", "3": "unsure", "9": "callback_requested"}.get(digit, "no_response")
+    return {
+        "action": "mark_rsvp",
+        "digit": digit,
+        "rsvp": status,
+        "status": status,
+        "text": render_script(scripts[script_key], script_vars),
+        "reason": "local fast-path after DTMF RSVP response",
+        "source": "agi_fast_path",
+    }
 
 
 def agi_hung_up(response: str) -> bool:
@@ -723,8 +820,10 @@ def run_ai_flow(
             collect_digits = max(1, min(int(decision.get("collect_digits") or 1), 2))
         except (TypeError, ValueError):
             collect_digits = 1
-        response = agi(f"GET DATA {shlex.quote(prompt_file)} {int(decision.get('listen_ms') or listen_ms)} {collect_digits}")
-        if agi_hung_up(response):
+        listen_timeout = int(decision.get("listen_ms") or listen_ms)
+        escape_digits = stage_escape_digits(response_stage)
+        prompt_response = agi(f"STREAM FILE {quote(prompt_file)} {quote(escape_digits)}")
+        if agi_hung_up(prompt_response):
             hangup_status = "attending_needs_headcount" if response_stage == "attending_followup" else "no_response"
             hangup_digit = "1" if response_stage == "attending_followup" else ""
             hangup_decision = {"action": "complete", "status": hangup_status, "digit": hangup_digit, "reason": "caller hung up during AI prompt/listen", "source": "agi"}
@@ -744,19 +843,55 @@ def run_ai_flow(
                 party_details="Caller hung up before headcount." if response_stage == "attending_followup" else "",
             )
             return True
-        digit = extract_digits(response, collect_digits)
-        if response_stage != "attending_followup" and digit not in {"1", "2", "3", "9"}:
-            digit = ""
+
+        digit = digit_from_agi_response(prompt_response, collect_digits, response_stage)
+        recording_path = ""
+        voice_recording = ""
+        if not digit:
+            recording_path, voice_recording, record_response = record_clip_with_response(
+                recording_dir,
+                attempt_id,
+                f"ai-turn-{turn}",
+                listen_timeout,
+                int(os.getenv("AI_RESPONSE_SILENCE_SECONDS", "2")),
+                escape_digits,
+            )
+            if agi_hung_up(record_response):
+                hangup_status = "attending_needs_headcount" if response_stage == "attending_followup" else "no_response"
+                hangup_digit = "1" if response_stage == "attending_followup" else ""
+                hangup_decision = {"action": "complete", "status": hangup_status, "digit": hangup_digit, "reason": "caller hung up during AI response recording", "source": "agi"}
+                append_trace(trace, "caller_hangup", hangup_decision, last_transcript, "", last_recording)
+                post_result(
+                    contact_id,
+                    attempt_id,
+                    hangup_digit,
+                    f"AI caller hangup during response recording; greeting={greeting_transcript}; response={last_transcript}",
+                    amd_status,
+                    amd_cause,
+                    last_recording,
+                    last_transcript,
+                    hangup_status,
+                    json.dumps(hangup_decision, ensure_ascii=True, separators=(",", ":")),
+                    json.dumps(trace[-20:], ensure_ascii=True),
+                    party_details="Caller hung up before headcount." if response_stage == "attending_followup" else "",
+                )
+                return True
+            digit = digit_from_agi_response(record_response, collect_digits, response_stage)
+
         if digit:
-            payload = decision_payload(campaign_id, contact_id, attempt_id, contact_name, response_stage, turn, "", answer_class, digit)
-            try:
-                decision = post_decision(payload)
-            except Exception as exc:
-                decision = {"action": "complete", "status": "no_response", "reason": f"AI decision failed after DTMF: {exc}"}
-            append_trace(trace, response_stage, decision, "", digit, "")
+            if response_stage != "attending_followup" and digit == "1":
+                decision = menu_digit_fast_path(digit, scripts, script_vars, listen_timeout)
+            elif response_stage != "attending_followup" and digit in {"2", "3", "9"}:
+                decision = menu_digit_fast_path(digit, scripts, script_vars, listen_timeout)
+            else:
+                payload = decision_payload(campaign_id, contact_id, attempt_id, contact_name, response_stage, turn, "", answer_class, digit)
+                try:
+                    decision = post_decision(payload)
+                except Exception as exc:
+                    decision = {"action": "complete", "status": "no_response", "reason": f"AI decision failed after DTMF: {exc}"}
+            append_trace(trace, response_stage, decision, "", digit, voice_recording)
             continue
 
-        recording_path, voice_recording = record_clip(recording_dir, attempt_id, f"ai-turn-{turn}", int(decision.get("listen_ms") or listen_ms), 2)
         transcript = maybe_transcribe(recording_path if voice_recording else "")
         last_transcript = transcript or last_transcript
         last_recording = voice_recording or last_recording

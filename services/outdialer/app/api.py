@@ -1993,6 +1993,31 @@ def agi_decision(payload: dict[str, object], db: Session = Depends(get_db)) -> d
     campaign = ensure_campaign(db, campaign_id)
     contact = db.get(Contact, contact_id) if contact_id else None
     attempt = db.get(CallAttempt, attempt_id) if attempt_id else None
+    transcript = str(payload.get("transcript") or "")
+
+    if stage == "attending_followup":
+        party_info = parse_party_info(transcript, str(payload.get("digit") or ""))
+        if party_info.get("party_size"):
+            decision = attending_done_decision(
+                campaign,
+                contact,
+                party_info,
+                "captured total headcount during attending follow-up",
+                "local_guard",
+            )
+            decision["listen_ms"] = clamp_int(decision.get("listen_ms"), campaign.ai_listen_ms or 7000, 1000, 20000)
+            decision["collect_digits"] = clamp_int(decision.get("collect_digits"), 1, 1, 2)
+            decision["max_turns"] = campaign.ai_max_turns or 3
+            decision["observe_ms"] = clamp_int(campaign.ai_observe_ms, 0, 0, 15000)
+            append_ai_trace(db, attempt, payload, decision)
+            add_event(
+                db,
+                "ai_decision",
+                f"AI decision: {decision.get('action')}",
+                campaign_id=campaign.id,
+                details=f"attempt_id={attempt_id} contact_id={contact_id} payload={compact_json(payload)} decision={compact_json(decision)}",
+            )
+            return decision
 
     if not campaign.ai_enabled:
         decision = normalize_ai_decision({"action": "legacy", "reason": "AI disabled for this campaign", "source": "local"})
@@ -2007,7 +2032,6 @@ def agi_decision(payload: dict[str, object], db: Session = Depends(get_db)) -> d
     action = str(decision.get("action") or "")
     status = str(decision.get("status") or "")
     digit = str(decision.get("digit") or "")
-    transcript = str(payload.get("transcript") or "")
     if (
         stage == "answer_observed"
         and not transcript.strip()
