@@ -608,6 +608,8 @@ def call_flowise(campaign: Campaign, contact: Contact | None, payload: dict[str,
             "next_stage, collect_digits, party_size, party_kids, party_friends, party_family, and party_details. "
             "If the contact says they are attending but no total headcount is known, return action=speak_and_listen, "
             "next_stage=attending_followup, collect_digits=2, and ask for the total number coming plus kids/friends/family details. "
+            "When call_state.stage is attending_followup, a numeric call_state.digit is the total headcount, not the original RSVP menu. "
+            "For example, digit 2 during attending_followup means party_size=2 and status=attending, not status=not_attending. "
             "Only mark status=attending after party_size is known. Do not wrap it in markdown."
         ),
         "campaign": campaign.name,
@@ -2031,6 +2033,19 @@ def agi_decision(payload: dict[str, object], db: Session = Depends(get_db)) -> d
     party_info = parse_party_info(transcript, str(payload.get("digit") or "") if stage == "attending_followup" else "")
     if decision.get("party_size"):
         party_info.update(party_values_for_decision(decision))
+    if stage == "attending_followup" and party_info.get("party_size"):
+        original_source = str(decision.get("source") or "").strip()
+        guard_source = f"{original_source}_guard" if original_source and not original_source.endswith("_guard") else original_source or "local_guard"
+        decision = attending_done_decision(
+            campaign,
+            contact,
+            party_info,
+            "captured total headcount during attending follow-up",
+            guard_source,
+        )
+        action = str(decision.get("action") or "")
+        status = str(decision.get("status") or "")
+        digit = str(decision.get("digit") or "")
     classified_digit = classify_ai_rsvp(transcript, digit)
     if (
         action == "speak_and_listen"
