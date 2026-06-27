@@ -18,6 +18,7 @@ VALID_DIAL_NORMALIZATIONS = {"nanp_1", "strip_only", "as_entered"}
 FINAL_SIP_FAILURE_MIN = 300
 SIP_RESPONSE_RE = re.compile(r"SIP/2\.0\s+(\d{3}[^\r\n]*)")
 LOG_TS_RE = re.compile(r"^\[(\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2})\]")
+CALL_FILE_RESULT_RE = re.compile(r"^(Status|Set):\s*(.*)$")
 
 
 def log_event(db, event_type: str, message: str, level: str = "info", details: str | None = None, campaign_id: str | None = None) -> None:
@@ -190,6 +191,63 @@ def sync_sip_failures(db, now: datetime) -> None:
     db.commit()
 
 
+def parse_done_call_file(path: Path) -> dict[str, str]:
+    result: dict[str, str] = {}
+    for line in path.read_text(errors="ignore").splitlines():
+        match = CALL_FILE_RESULT_RE.match(line.strip())
+        if not match:
+            continue
+        key, value = match.groups()
+        if key == "Status":
+            result["status"] = value.strip()
+        elif value.startswith("ATTEMPT_ID="):
+            result["attempt_id"] = value.split("=", 1)[1].strip()
+    if "attempt_id" not in result and path.name.endswith(".call"):
+        result["attempt_id"] = path.name[:-5]
+    return result
+
+
+def sync_call_file_results(db, now: datetime) -> None:
+    done_dir = Path(settings.asterisk_outgoing_dir).parent / "outgoing_done"
+    if not done_dir.exists():
+        return
+    cutoff = now - timedelta(hours=24)
+    for path in sorted(done_dir.glob("*.call"), key=lambda item: item.stat().st_mtime, reverse=True)[:500]:
+        try:
+            mtime = datetime.fromtimestamp(path.stat().st_mtime, timezone.utc)
+        except OSError:
+            continue
+        if mtime < cutoff:
+            break
+        result = parse_done_call_file(path)
+        asterisk_status = result.get("status", "")
+        if asterisk_status not in {"Expired", "Failed"}:
+            continue
+        attempt_id = result.get("attempt_id")
+        if not attempt_id:
+            continue
+        attempt = db.get(CallAttempt, attempt_id)
+        if not attempt or attempt.status not in {"queued", "originated"} or attempt.completed_at:
+            continue
+        attempt.status = "failed"
+        attempt.completed_at = mtime
+        reason = (
+            "Asterisk call file expired before the call connected"
+            if asterisk_status == "Expired"
+            else "Asterisk call file failed before completion"
+        )
+        attempt.message = f"{attempt.message or 'Call file handed to Asterisk'}; {reason}"
+        log_event(
+            db,
+            "call_failed_call_file",
+            f"Call attempt {asterisk_status.lower()} in Asterisk outgoing_done.",
+            level="error",
+            details=f"attempt_id={attempt.id} contact_id={attempt.contact_id} dialed={attempt.dialed_number} file={path.name}",
+            campaign_id=attempt.campaign_id,
+        )
+    db.commit()
+
+
 def call_metadata(campaign: Campaign, contact: Contact) -> dict[str, str]:
     normalization = campaign.dial_normalization or "nanp_1"
     if normalization not in VALID_DIAL_NORMALIZATIONS:
@@ -275,6 +333,7 @@ def write_call_file(contact: Contact, attempt: CallAttempt, meta: dict[str, str]
 def tick() -> None:
     now = datetime.now(timezone.utc)
     with SessionLocal() as db:
+        sync_call_file_results(db, now)
         sync_sip_failures(db, now)
         campaigns = db.scalars(select(Campaign).where(Campaign.enabled == 1).order_by(Campaign.created_at)).all()
         if not campaigns:
