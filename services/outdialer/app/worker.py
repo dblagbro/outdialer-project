@@ -1,5 +1,6 @@
 import os
 import re
+import socket
 import time
 import traceback
 from datetime import datetime, timedelta, timezone
@@ -285,6 +286,24 @@ def call_metadata(campaign: Campaign, contact: Contact) -> dict[str, str]:
     }
 
 
+def sip_target_reachable(meta: dict[str, str]) -> tuple[bool, str]:
+    transport = os.getenv("AVAYA_SIP_TRANSPORT", "udp").strip().lower()
+    host = meta.get("sip_target") or os.getenv("AVAYA_SIP_HOST", "")
+    try:
+        port = int(os.getenv("AVAYA_SIP_PORT", "5060"))
+    except ValueError:
+        port = 5060
+    if not host:
+        return False, "SIP target host is blank"
+    if transport != "tcp":
+        return True, f"reachability preflight skipped for {transport or 'udp'} transport"
+    try:
+        with socket.create_connection((host, port), timeout=2.0):
+            return True, f"tcp {host}:{port} reachable"
+    except OSError as exc:
+        return False, f"tcp {host}:{port} unreachable: {exc}"
+
+
 def write_call_file(contact: Contact, attempt: CallAttempt, meta: dict[str, str]) -> None:
     outgoing = Path(settings.asterisk_outgoing_dir)
     tmp_dir = outgoing.parent / "tmp"
@@ -415,6 +434,21 @@ def tick() -> None:
                         )
                     continue
                 meta = call_metadata(campaign, contact)
+                reachable, reachability_detail = sip_target_reachable(meta)
+                if not reachable:
+                    if should_log_event(db, f"sip_target_unreachable_{campaign.id}_{meta['sip_target']}", now):
+                        log_event(
+                            db,
+                            "sip_target_unreachable",
+                            f"Skipped {contact.name}; SIP target is unreachable, so no attempt was counted.",
+                            level="error",
+                            details=(
+                                f"contact_id={contact.id} input={meta['dial_input']} dialed={meta['phone']} "
+                                f"sip_target={meta['sip_target']} sip_route={meta['sip_route']} detail={reachability_detail}"
+                            ),
+                            campaign_id=campaign.id,
+                        )
+                    continue
                 log_event(
                     db,
                     "queue_call",
