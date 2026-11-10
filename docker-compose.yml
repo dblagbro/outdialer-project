@@ -1,6 +1,6 @@
 services:
   postgres:
-    image: postgres:16-alpine
+    image: postgres@sha256:ac838714b7d794185a866e5a6b479b954e7d8a070568aa0acac6fe07c3070bf5
     environment:
       POSTGRES_DB: ${POSTGRES_DB:-outdialer}
       POSTGRES_USER: ${POSTGRES_USER:-outdialer}
