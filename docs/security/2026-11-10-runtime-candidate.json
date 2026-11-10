@@ -406,5 +406,22 @@
     "services/outdialer/app/models.py": "5bc781f95e059e87b52ed1b82a52481b40141529f84edbbafe4cd84111bb897a",
     "services/outdialer/app/worker.py": "dc05f08b3fa8b9a368127b1fa56071210d51c1d0d492ffbe41ca3c4dfd93dd93"
   },
-  "portable_test_runner_passed": true
+  "portable_test_runner_passed": true,
+  "recovery_rehearsal": {
+    "phase": "recovery_rehearsal_passed_not_deployed",
+    "snapshot_sha256": "8b806269790052045449f6d2f466c45aa48a45de78932c7b3995ba3906474c8b",
+    "final_quiesced_snapshot": false,
+    "original_rootfs_matched": true,
+    "candidate_api_health_passed": true,
+    "candidate_preserved_all_table_fingerprints": true,
+    "original_api_health_passed": true,
+    "original_preserved_all_table_fingerprints": true,
+    "restored_tables": 5,
+    "sip_calls": 0,
+    "external_provider_requests": 0,
+    "original_image_rollback_verified": true,
+    "consistent_online_snapshot_restored": true,
+    "isolated_runtime_removed": true
+  },
+  "portable_tcp_readiness_test_passed": true
 }
