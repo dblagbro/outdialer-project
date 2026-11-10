@@ -34,7 +34,7 @@ def main():
              '-e', 'POSTGRES_HOST_AUTH_METHOD=trust', '-e', 'POSTGRES_DB=isolated', pg])
         created.append(('container', db))
         for _ in range(60):
-            if subprocess.run(['docker', 'exec', db, 'pg_isready', '-U', 'postgres', '-d', 'isolated'],
+            if subprocess.run(['docker', 'exec', db, 'pg_isready', '-h', '127.0.0.1', '-U', 'postgres', '-d', 'isolated'],
                               stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL).returncode == 0:
                 break
             time.sleep(1)
